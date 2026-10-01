@@ -25,7 +25,7 @@ cd pi_configs
 cd ..
 ```
 
-The deployer shows changes and asks before copying. `--target host` copies to your regular host Pi profile; `--target both` copies to both. Its default is `host`.
+The deployer shows changes and asks before copying. `--target host` copies to your regular host Pi profile; `--target both` copies to both. Its default is `host`. Use `--check` for a non-interactive drift report (exit 1 if drift), and `--restore` to roll the listed destinations back from their `.bak` backups.
 
 ## Open a project
 
@@ -34,7 +34,25 @@ cd /path/to/your/project
 pi-docker
 ```
 
-The current directory is writable inside Pi as `/workspace`. Use `/model` to choose a model and `/sandbox` to check permission-mode status. Run the config deployer again only when you change files in `pi_configs/`.
+The current directory is writable inside Pi as `/workspace`, or pass `pi-docker --project DIR` to bind another directory. Use `/model` to choose a model and `/sandbox` to check permission-mode status. `pi-docker --help` lists all options. Run the config deployer again only when you change files in `pi_configs/`.
+
+## Manage settings
+
+Service URLs, API keys, and resource limits live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
+
+```bash
+pi-docker config list                 # show saved settings (API keys masked)
+pi-docker config set ANTHROPIC_API_KEY sk-...
+pi-docker config set PI_DOCKER_MEMORY 8g
+pi-docker config get SEARXNG_URL
+pi-docker config unset GROQ_API_KEY
+```
+
+Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+
+## Check health
+
+`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, Tailscale DNS, and PATH, and exits nonzero when anything fails.
 
 ## Later
 

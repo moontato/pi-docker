@@ -8,7 +8,7 @@ Keep the JSON and extension files in this folder as the canonical copies. The de
 
 That command syncs this folder into the separate `pi-docker` profile and installs missing `pi-permission-modes` and `pi-ext-int-search` packages. The `install-pi-docker.sh` installer also installs those packages, so `--install-packages` is most useful when restoring the configuration on another computer. No Docker image rebuild is needed for configuration changes.
 
-Use `--target both` to sync both Pi profiles, or run without flags to retain the original host-only workflow. Add `--yes` to apply the previewed changes and make `.bak` backups without prompting.
+Use `--target both` to sync both Pi profiles, or run without flags to retain the original host-only workflow. Add `--yes` to apply the previewed changes and make `.bak` backups without prompting. `--check` reports drift without applying anything (exit 1 if drift), and `--restore` rolls the selected target back from its `.bak` backups.
 
 | Canonical file | Host Pi destination | pi-docker destination |
 | --- | --- | --- |

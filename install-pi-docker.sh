@@ -188,7 +188,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v2.1)
+# Managed by install-pi-docker.sh (v3)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -609,6 +609,11 @@ check_file() {
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 6f53b50b526db4d3a081802589bf79552bf3790cd94a5eeed57a82395bc95044 ]]; then
                 return
             fi
+            # Exact v2.1 launcher can be upgraded while preserving customized copies.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
             if [[ $destination == "$DOCKERFILE" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 553a25e729d82e38f7883f345d8b1b0672f15aa1aa70397a49d4b691967de8a0 ]]; then
@@ -724,7 +729,7 @@ if [[ -f $DATA_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$
     printf 'Note: @oresk/pi-searxng also declares web_search; consider removing it if both tools conflict.\n' >&2
 fi
 
-printf '\nReady: %s\nRun `pi-docker` from a project directory.\n' "$LAUNCHER"
+printf '\nReady: %s\nRun `pi-docker` from a project directory (pi-docker --help lists options).\nCheck health anytime with: pi-docker doctor\n' "$LAUNCHER"
 if [[ :$PATH: != *":$BIN_DIR:"* ]]; then
     printf 'Add %s to your PATH to use `pi-docker` by name.\n' "$BIN_DIR"
 fi
