@@ -154,19 +154,50 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
 TAILNET=1
-while (($#)) && [[ ${1:-} == --tailnet || ${1:-} == --no-tailnet ]]; do
-    if [[ $1 == --no-tailnet ]]; then
-        TAILNET=0
-    fi
+PROJECT_DIR=''
+
+die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: pi-docker [options] [pi args...]
+
+Options:
+  --tailnet          Use the host network and Tailscale DNS (default).
+  --no-tailnet       Use Docker's normal network instead.
+  --project DIR      Bind DIR as /workspace instead of the current directory.
+  -h, --help         Show this help.
+
+Known options are consumed; everything else is passed to Pi unchanged.
+USAGE
+}
+
+while (($#)); do
+    case $1 in
+        --tailnet) TAILNET=1 ;;
+        --no-tailnet) TAILNET=0 ;;
+        --project)
+            (( $# >= 2 )) || die '--project requires a directory.'
+            PROJECT_DIR=$2
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) break ;;
+    esac
     shift
 done
 
-[[ -d $PWD ]] || { echo 'Cannot locate the project directory.' >&2; exit 1; }
-mkdir -p "$AGENT_DIR" "$SANDBOX_HOME"
-chmod 700 "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+workdir_src=$(pwd -P)
+if [[ -n $PROJECT_DIR ]]; then
+    [[ -d $PROJECT_DIR ]] || die "Project directory not found: $PROJECT_DIR"
+    workdir_src=$(cd -- "$PROJECT_DIR" && pwd -P) || die "Cannot resolve project directory: $PROJECT_DIR"
+fi
+
+mkdir -p "$CONFIG_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
 
 args=(run --rm --init --pids-limit=512
-    --mount "type=bind,source=$(pwd -P),target=/workspace"
+    --mount "type=bind,source=$workdir_src,target=/workspace"
     --mount "type=bind,source=$AGENT_DIR,target=/pi-agent"
     --mount "type=bind,source=$SANDBOX_HOME,target=/home/pi"
     --workdir /workspace
