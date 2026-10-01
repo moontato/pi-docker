@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "llama-server": {
+      "baseUrl": "http://llama-server.example:11435/v1",
+      "api": "openai-completions",
+      "apiKey": "dummy",
+      "models": [
+        {
+          "id": "your-model-id",
+          "name": "Your model name",
+          "reasoning": false,
+          "contextWindow": 250000,
+          "maxTokens": 200000
+        }
+      ]
+    }
+  }
+}

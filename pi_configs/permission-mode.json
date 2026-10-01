@@ -1,0 +1,205 @@
+{
+  "$schema": "./schemas/permission-mode.schema.json",
+  "defaultMode": "default",
+  "cycleOrder": ["default", "host-nosandbox", "plan", "build", "yolo"],
+  "modes": {
+    "default": {
+      "label": "Default",
+      "color": "muted",
+      "sandbox": {
+        "enabled": true,
+        "writable": true,
+        "denyWrite": [],
+        "network": {
+          "allowedDomains": [
+            "npmjs.org",
+            "*.npmjs.org",
+            "registry.npmjs.org",
+            "registry.yarnpkg.com",
+            "pypi.org",
+            "*.pypi.org",
+            "github.com",
+            "*.github.com",
+            "api.github.com",
+            "raw.githubusercontent.com"
+          ],
+          "deniedDomains": []
+        }
+      },
+      "permission": {
+        "path": { "*": "allow" },
+        "external_directory": "ask",
+        "read": "allow",
+        "grep": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "write": "ask",
+        "edit": "ask",
+        "bash": { "*": "ask" },
+        "web_search": "ask",
+        "tool": "ask",
+        "skill": "ask"
+      }
+    },
+    "plan": {
+      "label": "Plan Mode",
+      "color": "mdLink",
+      "systemPrompt": "@plan",
+      "sandbox": {
+        "enabled": true,
+        "writable": false,
+        "denyWrite": [],
+        "network": {
+          "allowedDomains": [
+            "npmjs.org",
+            "*.npmjs.org",
+            "registry.npmjs.org",
+            "registry.yarnpkg.com",
+            "pypi.org",
+            "*.pypi.org",
+            "github.com",
+            "*.github.com",
+            "api.github.com",
+            "raw.githubusercontent.com"
+          ],
+          "deniedDomains": []
+        }
+      },
+      "permission": {
+        "path": { "*": "allow" },
+        "external_directory": "ask",
+        "read": "allow",
+        "grep": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "write": { "*": "deny", "*.md": "allow", "*.markdown": "allow" },
+        "edit": { "*": "deny", "*.md": "allow", "*.markdown": "allow" },
+        "bash": { "*": "allow" },
+        "web_search": "allow",
+        "tool": "ask",
+        "skill": "ask"
+      }
+    },
+    "build": {
+      "label": "Build",
+      "color": "accent",
+      "sandbox": {
+        "enabled": true,
+        "writable": true,
+        "denyWrite": [],
+        "network": {
+          "allowedDomains": [
+            "npmjs.org",
+            "*.npmjs.org",
+            "registry.npmjs.org",
+            "registry.yarnpkg.com",
+            "pypi.org",
+            "*.pypi.org",
+            "github.com",
+            "*.github.com",
+            "api.github.com",
+            "raw.githubusercontent.com"
+          ],
+          "deniedDomains": []
+        }
+      },
+      "permission": {
+        "path": { "*": "allow" },
+        "external_directory": "ask",
+        "read": "allow",
+        "grep": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "write": "allow",
+        "edit": "allow",
+        "bash": { "*": "allow" },
+        "web_search": "allow",
+        "tool": "allow",
+        "skill": "allow"
+      }
+    },
+    "host-nosandbox": {
+      "label": "Host (no sandbox)",
+      "color": "muted",
+      "sandbox": {
+        "enabled": false,
+        "writable": true
+      },
+      "permission": {
+        "path": { "*": "allow", "*.env": "deny" },
+        "external_directory": "ask",
+        "read": "allow",
+        "grep": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "write": "ask",
+        "edit": "ask",
+        "bash": {
+          "cat*": "allow",
+          "head*": "allow",
+          "tail*": "allow",
+          "ls*": "allow",
+          "find*": "allow",
+          "grep*": "allow",
+          "rg*": "allow",
+          "echo*": "allow",
+          "pwd": "allow",
+          "which*": "allow",
+          "wc*": "allow",
+          "file*": "allow",
+          "stat*": "allow",
+          "du*": "allow",
+          "df*": "allow",
+          "date": "allow",
+          "uname*": "allow",
+          "type*": "allow",
+          "alias": "allow",
+          "whoami": "allow",
+          "id": "allow",
+          "basename*": "allow",
+          "dirname*": "allow",
+          "realpath*": "allow",
+          "readlink*": "allow",
+          "diff*": "allow",
+          "sort*": "allow",
+          "uniq*": "allow",
+          "cut*": "allow",
+          "jq*": "allow",
+          "git status": "allow",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "git show*": "allow",
+          "git branch*": "allow",
+          "git rev-parse*": "allow",
+          "git remote -v": "allow",
+          "git ls-files*": "allow",
+          "git describe*": "allow",
+          "*": "ask"
+        },
+        "web_search": "ask",
+        "tool": "ask",
+        "skill": "ask"
+      }
+    },
+    "yolo": {
+      "label": "YOLO",
+      "color": "error",
+      "sandbox": { "enabled": false, "writable": true },
+      "bypassProtectedPaths": true,
+      "permission": {
+        "path": { "*": "allow" },
+        "external_directory": "allow",
+        "read": "allow",
+        "write": "allow",
+        "edit": "allow",
+        "grep": "allow",
+        "find": "allow",
+        "ls": "allow",
+        "bash": { "*": "allow" },
+        "web_search": "allow",
+        "tool": "allow",
+        "skill": "allow"
+      }
+    }
+  }
+}

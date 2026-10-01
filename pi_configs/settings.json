@@ -1,0 +1,21 @@
+{
+  "lastChangelogVersion": "0.85.1",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-permission-modes",
+    "npm:pi-ext-int-search"
+  ],
+  "defaultProvider": "llama-server",
+  "defaultModel": "your-model-id",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000,
+    "modelOverrides": {
+      "llama-server/your-model-id": {
+        "reserveTokens": 40000
+      }
+    }
+  },
+  "hideThinkingBlock": false
+}

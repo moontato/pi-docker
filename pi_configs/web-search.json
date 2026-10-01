@@ -1,0 +1,14 @@
+{
+  "searxngBaseUrl": "https://searxng.example:8889",
+  "provider": "searxng",
+  "workflow": "none",
+  "webSearch": {
+    "enabled": true,
+    "allowedProviders": ["searxng"]
+  },
+  "ssrf": {
+    "allowRanges": [
+      "100.100.0.1/32"
+    ]
+  }
+}
