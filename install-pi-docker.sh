@@ -207,12 +207,27 @@ die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'USAGE'
 Usage: pi-docker [options] [pi args...]
+       pi-docker config [list|get|set|unset] [KEY [VALUE]]
+       pi-docker doctor
 
 Options:
   --tailnet          Use the host network and Tailscale DNS (default).
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
   -h, --help         Show this help.
+
+Commands:
+  config             Manage settings saved in ~/.config/pi-docker/env:
+                       pi-docker config list           show settings (keys masked)
+                       pi-docker config get KEY        show one value
+                       pi-docker config set KEY VALUE  save a value
+                       pi-docker config unset KEY      remove a value
+  doctor             Check Docker, image, packages, settings, and network.
+
+Recognized settings (shell environment always wins over saved values):
+  SEARXNG_URL, LLAMA_BASE_URL, LLAMA_API_KEY, PI_DOCKER_MEMORY, PI_DOCKER_CPUS,
+  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY,
+  GROQ_API_KEY.
 
 Known options are consumed; everything else is passed to Pi unchanged.
 USAGE
@@ -376,8 +391,127 @@ migrate_legacy_url_files() {
     done
 }
 
+# --- Health checks ---
+
+DOCTOR_PASS=0
+DOCTOR_FAIL=0
+
+doc_ok()   { printf '  [ok]   %s\n' "$1"; DOCTOR_PASS=$((DOCTOR_PASS + 1)); }
+doc_bad()  { printf '  [FAIL] %s\n' "$1"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
+doc_note() { printf '  [note] %s\n' "$1"; }
+
+launcher_version() {
+    local v
+    v=$(sed -n '2s/^#.*(\(.*\))$/\1/p' "$0")
+    printf '%s' "${v:-unknown}"
+}
+
+doctor() {
+    local url key line label have_docker
+    printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
+
+    if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+        doc_ok 'Docker daemon reachable'
+        have_docker=1
+    else
+        doc_bad 'Docker daemon not reachable (is Docker installed and running?)'
+        have_docker=0
+    fi
+
+    if (( have_docker )); then
+        if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+            label=$(docker image inspect --format '{{ index .Config.Labels "io.pi-docker.installer" }}' "$IMAGE" 2>/dev/null || true)
+            if [[ -n $label ]]; then
+                doc_ok "Image $IMAGE present (managed, installer version $label)"
+            else
+                doc_bad "Image $IMAGE exists but is not managed by install-pi-docker.sh"
+            fi
+            if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg' >/dev/null 2>&1; then
+                doc_ok 'Image sandbox dependencies present (bwrap, socat, rg)'
+            else
+                doc_bad 'Image sandbox dependencies missing (rerun: ./install-pi-docker.sh --rebuild)'
+            fi
+        else
+            doc_bad "Image $IMAGE missing (run ./install-pi-docker.sh)"
+        fi
+    fi
+
+    doc_ok "Launcher version: $(launcher_version)"
+
+    for key in pi-permission-modes pi-ext-int-search; do
+        if [[ -d $AGENT_DIR/npm/node_modules/$key ]]; then
+            doc_ok "Package installed: $key"
+        else
+            doc_bad "Package missing: $key (rerun the installer, or: pi-docker install npm:$key)"
+        fi
+    done
+
+    for line in "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"; do
+        if [[ -d $line ]]; then
+            doc_ok "Directory: $line"
+        else
+            doc_bad "Directory missing: $line"
+        fi
+    done
+
+    if [[ -f $ENV_FILE ]]; then
+        doc_ok "Settings file: $ENV_FILE"
+        while IFS= read -r line || [[ -n $line ]]; do
+            key=${line%%=*}
+            case $key in
+                *API_KEY) doc_note "set: $key=***" ;;
+                *) doc_note "set: $line" ;;
+            esac
+        done < "$ENV_FILE"
+    else
+        doc_note 'No settings file yet (pi-docker config set KEY VALUE)'
+    fi
+
+    if command -v curl >/dev/null; then
+        for key in SEARXNG_URL LLAMA_BASE_URL; do
+            url=''
+            if [[ -v $key ]]; then url=${!key}; fi
+            if [[ -z $url ]]; then url=$(env_get "$key"); fi
+            if [[ -n $url ]]; then
+                if curl -s -o /dev/null --max-time 3 "$url"; then
+                    doc_ok "$key reachable: $url"
+                else
+                    doc_bad "$key not reachable: $url"
+                fi
+            else
+                doc_note "$key not configured"
+            fi
+        done
+    else
+        doc_note 'curl not found; skipping URL reachability checks'
+    fi
+
+    if command -v timeout >/dev/null; then
+        if timeout 2 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; then
+            doc_ok 'Tailscale DNS (100.100.100.100:53) reachable'
+        else
+            doc_bad 'Tailscale DNS unreachable (is tailscaled running? use --no-tailnet to fall back)'
+        fi
+    else
+        doc_note 'timeout not found; skipping Tailscale DNS probe'
+    fi
+
+    if [[ :$PATH: == *":$HOME/.local/bin:"* ]]; then
+        doc_ok '~/.local/bin on PATH'
+    else
+        doc_note "Add $HOME/.local/bin to PATH to run pi-docker by name"
+    fi
+
+    printf '\n%d passed, %d failed\n' "$DOCTOR_PASS" "$DOCTOR_FAIL"
+    if (( DOCTOR_FAIL > 0 )); then
+        return 1
+    fi
+    return 0
+}
+
 case ${1:-} in
     config) shift; run_config "$@" ;;
+    doctor) doctor || exit 1; exit 0 ;;
 esac
 
 while (($#)); do
