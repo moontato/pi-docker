@@ -547,12 +547,14 @@ if (( ORIN_VALIDATE && $# )); then die '--orin-validate does not accept Pi argum
 if (( ORIN_MODE )); then
     [[ -z $PROJECT_DIR ]] || die 'Orin mode uses /mnt/ssd/llama-orin-test; omit --project.'
     [[ $(uname -m) == aarch64 ]] || die 'Orin mode requires aarch64.'
-    for path in /mnt/ssd/llama-orin-test /mnt/ssd/llamacpp_models /usr/local/cuda-13.2 /opt/nvidia/nsight-compute; do
+    for path in /mnt/ssd/llama-orin-test /mnt/ssd/llamacpp_models /usr/local/cuda-13.2; do
         [[ -d $path && ! -L $path ]] || die "Required Orin directory missing or symlink: $path"
     done
     [[ -f /mnt/ssd/llama-orin-test/CMakeLists.txt ]] || die 'llama.cpp development tree is missing CMakeLists.txt.'
     [[ -x /usr/local/cuda-13.2/bin/nvcc ]] || die 'CUDA 13.2 nvcc is missing.'
-    [[ -x /usr/local/cuda-13.2/bin/ncu ]] || die 'CUDA 13.2 ncu is missing.'
+    if (( ORIN_MODE == 2 )) && [[ ! -x /usr/local/cuda-13.2/bin/ncu || ! -d /opt/nvidia/nsight-compute || -L /opt/nvidia/nsight-compute ]]; then
+        printf 'pi-docker: warning: Nsight Compute is unavailable; profiling validation will fail. CUDA development can still run.\n' >&2
+    fi
     docker image inspect "$ORIN_IMAGE" >/dev/null 2>&1 || die "Orin image missing; run ./install-pi-docker.sh --install-orin"
     docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"' || die 'NVIDIA Container Runtime not available in Docker (or Docker inaccessible).'
     PROJECT_DIR=/mnt/ssd/llama-orin-test
@@ -587,8 +589,13 @@ if (( ORIN_MODE )); then
         --env NVIDIA_VISIBLE_DEVICES=all
         --env NVIDIA_DRIVER_CAPABILITIES=compute,utility
         --mount 'type=bind,source=/usr/local/cuda-13.2,target=/usr/local/cuda-13.2,readonly'
-        --mount 'type=bind,source=/opt/nvidia/nsight-compute,target=/opt/nvidia/nsight-compute,readonly'
         --mount 'type=bind,source=/mnt/ssd/llamacpp_models,target=/models,readonly')
+    if [[ -d /opt/nvidia/nsight-compute && ! -L /opt/nvidia/nsight-compute ]]; then
+        args+=(--mount 'type=bind,source=/opt/nvidia/nsight-compute,target=/opt/nvidia/nsight-compute,readonly')
+    fi
+    if [[ -d /opt/nvidia/nsight-systems && ! -L /opt/nvidia/nsight-systems ]]; then
+        args+=(--mount 'type=bind,source=/opt/nvidia/nsight-systems,target=/opt/nvidia/nsight-systems,readonly')
+    fi
     gpu_gids=()
     for device in /dev/nvhost-ctrl-gpu /dev/nvidia0 /dev/dri/renderD128; do
         if [[ -e $device ]]; then
@@ -597,7 +604,7 @@ if (( ORIN_MODE )); then
         fi
     done
     args+=(--env "PI_DOCKER_GPU_GIDS=${gpu_gids[*]}")
-    (( ORIN_MODE != 2 )) || args+=(--cap-add=SYS_ADMIN)
+    (( ORIN_MODE != 2 )) || args+=(--cap-add=SYS_ADMIN --env PI_DOCKER_ORIN_PROFILE=1)
     (( ! ORIN_VALIDATE )) || args+=(--env PI_DOCKER_ORIN_VALIDATE=1)
 fi
 
