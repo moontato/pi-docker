@@ -36,6 +36,46 @@ pi-docker
 
 The current directory is writable inside Pi as `/workspace`, or pass `pi-docker --project DIR` to bind another directory. Use `/model` to choose a model and `/sandbox` to check permission-mode status. `pi-docker --help` lists all options. Run the config deployer again only when you change files in `pi_configs/`.
 
+## Jetson AGX Orin CUDA development (opt-in)
+
+This mode targets an **aarch64 Jetson AGX Orin (SM 8.7)** running JetPack 7.2.1 / L4T R39.2.1 with the **host's CUDA 13.2** toolkit at `/usr/local/cuda-13.2`. It does not change the default image or `pi-docker` behavior on other hosts. Docker must have the NVIDIA Container Runtime registered (`docker info` should list `nvidia`), and your user must be able to access Docker. Ensure `/opt/nvidia/nsight-compute` exists on the host. The host CUDA toolkit and Nsight Compute are bind-mounted read-only; no CUDA toolkit is installed in the image. The opt-in image uses Ubuntu 24.04 to match host CUDA binary/glibc requirements. The host NVIDIA runtime supplies GPU devices and driver libraries. NVIDIA runtime configuration must support this image on your JetPack installation.
+
+From this repository, install/update the regular Pi bundle and build the *separate* Orin image:
+
+```bash
+./install-pi-docker.sh --install-orin
+```
+
+If the installer detects custom modifications to the installed launcher, review them first and use `--force` only if you intend to replace them. This step requires Docker access and network access for the initial image build.
+
+Launch development Pi, from any directory (the development tree is always `/workspace`):
+
+```bash
+pi-docker --orin
+```
+
+Launch Pi with the **additional `SYS_ADMIN` capability** for Nsight Compute GPU performance counters:
+
+```bash
+pi-docker --orin-profile
+```
+
+Validate either mode without starting Pi (runs a CUDA kernel-independent GPU properties probe compiled by the host's `nvcc`):
+
+```bash
+pi-docker --orin --orin-validate
+pi-docker --orin-profile --orin-validate
+```
+
+Both modes mount `/mnt/ssd/llama-orin-test` **read/write** at `/workspace`, `/mnt/ssd/llamacpp_models` **read-only** at `/models`, and the host CUDA toolkit at `/usr/local/cuda-13.2` and Nsight Compute at `/opt/nvidia/nsight-compute` (both read-only). They share the same Pi profile and network settings as the default launcher. GPU device-owner groups are added to the container user when needed. Neither mode uses `--privileged`; only profiling mode adds `CAP_SYS_ADMIN`. **Never build in `/mnt/ssd/llama.cpp`** (the production installation is not mounted by this mode). For example, inside Pi's shell in the development tree:
+
+```bash
+cmake -S /workspace -B /workspace/build-orin -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DCUDAToolkit_ROOT=/usr/local/cuda-13.2
+cmake --build /workspace/build-orin -j 8
+```
+
+The validation checks GPU visibility, reports and requires compute capability 8.7, runs `/usr/local/cuda-13.2/bin/nvcc --version` and `ncu --version`, checks the source tree and models mount, and verifies the model bind is read-only. It writes temporary probe files only under the container's temporary directory. `ncu --version` does **not** test performance counters: run an actual `ncu` profiling command in `--orin-profile` mode to test counters. Driver-level profiling restrictions or other host configuration can still block counters even with `SYS_ADMIN`. `SYS_ADMIN` is powerful: use profiling mode only when necessary. The NVIDIA Container Runtime must inject compatible Jetson device and driver libraries; if your runtime requires a JetPack-specific image or a different host library mapping, validation will fail and the runtime setup needs adjustment. CUDA 13.2 itself is never substituted with a different release.
+
 ## Manage settings
 
 Service URLs, API keys, and resource limits live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:

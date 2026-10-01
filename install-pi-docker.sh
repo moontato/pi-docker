@@ -4,6 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 IMAGE=local/pi-docker:latest
+ORIN_IMAGE=local/pi-docker:orin-sm87
 IMAGE_VERSION=2
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
@@ -14,6 +15,7 @@ CONFIGS_DIR="$SCRIPT_DIR/pi_configs"
 DOCKERFILE="$CONFIG_DIR/Dockerfile"
 ENV_FILE="$CONFIG_DIR/env"
 REBUILD=0
+INSTALL_ORIN=0
 FORCE=0
 SEARXNG_URL_ARG=''
 SET_SEARXNG=0
@@ -22,8 +24,9 @@ SET_LLAMA=0
 
 usage() {
     cat <<'USAGE'
-Usage: ./install-pi-docker.sh [--rebuild] [--force] [--searxng-url URL] [--llama-url URL]
+Usage: ./install-pi-docker.sh [--rebuild] [--install-orin] [--force] [--searxng-url URL] [--llama-url URL]
   --rebuild  Pull the base image and rebuild the managed Pi image (updates Pi).
+  --install-orin  Build the separate Ubuntu 24.04 arm64 Orin development image.
   --force    Replace conflicting files or image tag deliberately.
   --searxng-url URL  Override the SearXNG URL; default is searxngBaseUrl in pi_configs/web-search.json.
   --llama-url URL    Override the llama.cpp router URL; default is the defaultProvider's baseUrl in pi_configs/models.json.
@@ -100,6 +103,7 @@ migrate_legacy_url_files() {
 while (($#)); do
     case "$1" in
         --rebuild) REBUILD=1 ;;
+        --install-orin) INSTALL_ORIN=1 ;;
         --force) FORCE=1 ;;
         --searxng-url)
             (($# >= 2)) || die '--searxng-url requires a URL.'
@@ -188,16 +192,19 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v3)
+# Managed by install-pi-docker.sh (v4)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
+ORIN_IMAGE=local/pi-docker:orin-sm87
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
 TAILNET=1
 PROJECT_DIR=''
+ORIN_MODE=0
+ORIN_VALIDATE=0
 ENV_FILE="$CONFIG_DIR/env"
 
 config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
@@ -214,6 +221,9 @@ Options:
   --tailnet          Use the host network and Tailscale DNS (default).
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
+  --orin             Jetson AGX Orin CUDA development (no extra capabilities).
+  --orin-profile     Same as --orin, plus CAP_SYS_ADMIN for ncu counters.
+  --orin-validate    Run the Orin validation probe instead of Pi.
   -h, --help         Show this help.
 
 Commands:
@@ -518,6 +528,9 @@ while (($#)); do
     case $1 in
         --tailnet) TAILNET=1 ;;
         --no-tailnet) TAILNET=0 ;;
+        --orin) (( ORIN_MODE == 0 )) || die 'Select only one Orin mode.'; ORIN_MODE=1 ;;
+        --orin-profile) (( ORIN_MODE == 0 )) || die 'Select only one Orin mode.'; ORIN_MODE=2 ;;
+        --orin-validate) ORIN_VALIDATE=1 ;;
         --project)
             (( $# >= 2 )) || die '--project requires a directory.'
             PROJECT_DIR=$2
@@ -528,6 +541,23 @@ while (($#)); do
     esac
     shift
 done
+
+if (( ORIN_VALIDATE && ! ORIN_MODE )); then die '--orin-validate requires --orin or --orin-profile.'; fi
+if (( ORIN_VALIDATE && $# )); then die '--orin-validate does not accept Pi arguments.'; fi
+if (( ORIN_MODE )); then
+    [[ -z $PROJECT_DIR ]] || die 'Orin mode uses /mnt/ssd/llama-orin-test; omit --project.'
+    [[ $(uname -m) == aarch64 ]] || die 'Orin mode requires aarch64.'
+    for path in /mnt/ssd/llama-orin-test /mnt/ssd/llamacpp_models /usr/local/cuda-13.2 /opt/nvidia/nsight-compute; do
+        [[ -d $path && ! -L $path ]] || die "Required Orin directory missing or symlink: $path"
+    done
+    [[ -f /mnt/ssd/llama-orin-test/CMakeLists.txt ]] || die 'llama.cpp development tree is missing CMakeLists.txt.'
+    [[ -x /usr/local/cuda-13.2/bin/nvcc ]] || die 'CUDA 13.2 nvcc is missing.'
+    [[ -x /usr/local/cuda-13.2/bin/ncu ]] || die 'CUDA 13.2 ncu is missing.'
+    docker image inspect "$ORIN_IMAGE" >/dev/null 2>&1 || die "Orin image missing; run ./install-pi-docker.sh --install-orin"
+    docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"' || die 'NVIDIA Container Runtime not available in Docker (or Docker inaccessible).'
+    PROJECT_DIR=/mnt/ssd/llama-orin-test
+    IMAGE=$ORIN_IMAGE
+fi
 
 workdir_src=$(pwd -P)
 if [[ -n $PROJECT_DIR ]]; then
@@ -551,6 +581,25 @@ args=(run --rm --init --pids-limit=512
     --env "PI_DOCKER_GID=$(id -g)"
     --env "TERM=${TERM:-xterm-256color}"
 )
+
+if (( ORIN_MODE )); then
+    args+=(--runtime=nvidia
+        --env NVIDIA_VISIBLE_DEVICES=all
+        --env NVIDIA_DRIVER_CAPABILITIES=compute,utility
+        --mount 'type=bind,source=/usr/local/cuda-13.2,target=/usr/local/cuda-13.2,readonly'
+        --mount 'type=bind,source=/opt/nvidia/nsight-compute,target=/opt/nvidia/nsight-compute,readonly'
+        --mount 'type=bind,source=/mnt/ssd/llamacpp_models,target=/models,readonly')
+    gpu_gids=()
+    for device in /dev/nvhost-ctrl-gpu /dev/nvidia0 /dev/dri/renderD128; do
+        if [[ -e $device ]]; then
+            gid=$(stat -c %g "$device")
+            if [[ $gid != 0 && ! " ${gpu_gids[*]} " == *" $gid "* ]]; then gpu_gids+=("$gid"); fi
+        fi
+    done
+    args+=(--env "PI_DOCKER_GPU_GIDS=${gpu_gids[*]}")
+    (( ORIN_MODE != 2 )) || args+=(--cap-add=SYS_ADMIN)
+    (( ! ORIN_VALIDATE )) || args+=(--env PI_DOCKER_ORIN_VALIDATE=1)
+fi
 
 if ((TAILNET)); then
     # This shares the host network namespace, including the host's local services.
@@ -612,6 +661,11 @@ check_file() {
             # Exact v2.1 launcher can be upgraded while preserving customized copies.
             if [[ $destination == "$LAUNCHER" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
+                return
+            fi
+            # Upgrade the exact v3 launcher automatically, without replacing user edits.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
@@ -700,6 +754,13 @@ if [[ -z $existing_label || $existing_label != "$IMAGE_VERSION" || $REBUILD -eq 
         || die 'Image was built but a sandbox dependency is missing.'
 else
     printf 'Managed Docker image already installed: %s\n' "$IMAGE"
+fi
+
+if (( INSTALL_ORIN )); then
+    [[ $(uname -m) == aarch64 ]] || die '--install-orin requires an aarch64 host.'
+    # Separate tag: never replace the default managed image.
+    docker build --file "$SCRIPT_DIR/Dockerfile.orin" --tag "$ORIN_IMAGE" "$SCRIPT_DIR" \
+        || die 'Could not build the Orin image.'
 fi
 
 if ! cmp -s "$work_dir/pi-docker" "$LAUNCHER"; then
