@@ -38,7 +38,7 @@ The current directory is writable inside Pi as `/workspace`, or pass `pi-docker 
 
 ## Jetson AGX Orin CUDA development (opt-in)
 
-This mode targets an **aarch64 Jetson AGX Orin (SM 8.7)** running JetPack 7.2.1 / L4T R39.2.1 with the **host's CUDA 13.2** toolkit at `/usr/local/cuda-13.2`. It does not change the default image or `pi-docker` behavior on other hosts. Docker must have the NVIDIA Container Runtime registered (`docker info` should list `nvidia`), and your user must be able to access Docker. Ensure `/opt/nvidia/nsight-compute` exists on the host. The host CUDA toolkit and Nsight Compute are bind-mounted read-only; no CUDA toolkit is installed in the image. The opt-in image uses Ubuntu 24.04 to match host CUDA binary/glibc requirements. The host NVIDIA runtime supplies GPU devices and driver libraries. NVIDIA runtime configuration must support this image on your JetPack installation.
+This mode targets an **aarch64 Jetson AGX Orin (SM 8.7)** running JetPack 7.2.1 / L4T R39.2.1 with the **host's CUDA 13.2** toolkit at `/usr/local/cuda-13.2`. It does not change the default image or `pi-docker` behavior on other hosts. Docker must have the NVIDIA Container Runtime registered (`docker info` should list `nvidia`), and your user must be able to access Docker. The host CUDA toolkit is bind-mounted read-only; no CUDA toolkit is installed in the image. Host Nsight Compute (`/opt/nvidia/nsight-compute`) and Nsight Systems (`/opt/nvidia/nsight-systems`) are mounted read-only **when present**; neither is required for ordinary CUDA development. The opt-in image uses Ubuntu 24.04 to match host CUDA binary/glibc requirements. The host NVIDIA runtime supplies GPU devices and driver libraries. NVIDIA runtime configuration must support this image on your JetPack installation.
 
 From this repository, install/update the regular Pi bundle and build the *separate* Orin image:
 
@@ -60,21 +60,36 @@ Launch Pi with the **additional `SYS_ADMIN` capability** for Nsight Compute GPU 
 pi-docker --orin-profile
 ```
 
-Validate either mode without starting Pi (runs a CUDA kernel-independent GPU properties probe compiled by the host's `nvcc`):
+Validate either mode without starting Pi (compiles and checks the result of a tiny SM87 CUDA kernel with the host's `nvcc`; profiling validation additionally collects a hardware counter):
 
 ```bash
 pi-docker --orin --orin-validate
 pi-docker --orin-profile --orin-validate
 ```
 
-Both modes mount `/mnt/ssd/llama-orin-test` **read/write** at `/workspace`, `/mnt/ssd/llamacpp_models` **read-only** at `/models`, and the host CUDA toolkit at `/usr/local/cuda-13.2` and Nsight Compute at `/opt/nvidia/nsight-compute` (both read-only). They share the same Pi profile and network settings as the default launcher. GPU device-owner groups are added to the container user when needed. Neither mode uses `--privileged`; only profiling mode adds `CAP_SYS_ADMIN`. **Never build in `/mnt/ssd/llama.cpp`** (the production installation is not mounted by this mode). For example, inside Pi's shell in the development tree:
+Both modes mount `/mnt/ssd/llama-orin-test` **read/write** at `/workspace`, `/mnt/ssd/llamacpp_models` **read-only** at `/models`, and the host CUDA toolkit **read-only** at `/usr/local/cuda-13.2`. Optional profiler directories are mounted read-only if available; `--orin-profile` warns if Nsight Compute is missing, but CUDA development can still start. Profiling validation requires working `ncu` and an actual counter result. They share the same Pi profile and network settings as the default launcher. GPU device-owner groups are added to the container user when needed. Neither mode uses `--privileged`; only profiling mode adds `CAP_SYS_ADMIN`. **Never build in `/mnt/ssd/llama.cpp`** (the production installation is not mounted by this mode). For example, inside Pi's shell in the development tree:
 
 ```bash
-cmake -S /workspace -B /workspace/build-orin -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DCUDAToolkit_ROOT=/usr/local/cuda-13.2
+cmake -S /workspace -B /workspace/build-orin -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DGGML_CUDA_FA_QUANTS=f16-f16 -DCMAKE_BUILD_TYPE=Release -DCUDAToolkit_ROOT=/usr/local/cuda-13.2
 cmake --build /workspace/build-orin -j 8
 ```
 
-The validation checks GPU visibility, reports and requires compute capability 8.7, runs `/usr/local/cuda-13.2/bin/nvcc --version` and `ncu --version`, checks the source tree and models mount, and verifies the model bind is read-only. It writes temporary probe files only under the container's temporary directory. `ncu --version` does **not** test performance counters: run an actual `ncu` profiling command in `--orin-profile` mode to test counters. Driver-level profiling restrictions or other host configuration can still block counters even with `SYS_ADMIN`. `SYS_ADMIN` is powerful: use profiling mode only when necessary. The NVIDIA Container Runtime must inject compatible Jetson device and driver libraries; if your runtime requires a JetPack-specific image or a different host library mapping, validation will fail and the runtime setup needs adjustment. CUDA 13.2 itself is never substituted with a different release.
+The validator reports device count, name, SM version and memory, verifies a compiled CUDA kernel returns the correct result, checks `nvcc`, optionally checks `ncu` and `nsys` versions, and checks mount flags **and** file behavior (including reading `/models/Qwen3.8-27B-UD-Q4_K_XL.gguf`). In profiling mode it runs that probe under `ncu` and requires a hardware metric. Probe binaries live in `/tmp`; unique workspace test files are removed, and no existing models are changed. You can also ask Pi to run `/usr/local/bin/pi-docker-orin-validate` from its own shell/tool environment: this is necessary to establish that Pi's inner bubblewrap sandbox sees the same GPU, CUDA paths, and mounts. **Do not silently disable bubblewrap** if it fails; diagnose its boundary separately. Driver-level counter restrictions may still block `ncu` even with `SYS_ADMIN`. `SYS_ADMIN` is powerful: use profiling mode only when necessary. The NVIDIA Container Runtime must inject compatible Jetson devices and driver libraries; if your runtime requires a JetPack-specific image or different mapping, hardware validation must identify that before use. CUDA 13.2 is never substituted with a different release.
+
+For a stock-performance acceptance test, first prepare the **host** (`sudo nvpmodel -m 0; sudo jetson_clocks`; use host `tegrastats` as needed). Do not grant the container power-control privileges. The development tree currently contains unrelated local changes; **do not reset, clean, stash or check it out**. Create a separate worktree beneath the mounted development area at a new unused path, then build it *inside* `pi-docker --orin`:
+
+```bash
+# On the host, only after ensuring this destination does not already exist:
+mkdir -p /mnt/ssd/llama-orin-test/.worktrees
+git -C /mnt/ssd/llama-orin-test worktree add --detach /mnt/ssd/llama-orin-test/.worktrees/container-baseline def4d406ae2c2f39573120d68730fbb7760b24bf
+# In the Pi container (agent shell/tool):
+/usr/local/cuda-13.2/bin/nvcc --version  # must report V13.2.86
+cmake -S /workspace/.worktrees/container-baseline -B /workspace/.worktrees/container-baseline/build-container -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DGGML_CUDA_FA_QUANTS=f16-f16 -DCMAKE_BUILD_TYPE=Release -DCUDAToolkit_ROOT=/usr/local/cuda-13.2
+cmake --build /workspace/.worktrees/container-baseline/build-container -j 8
+/workspace/.worktrees/container-baseline/build-container/bin/llama-bench -m /models/Qwen3.8-27B-UD-Q4_K_XL.gguf -p 4096 -n 0 -b 2048 -ub 512 -ngl 999 -fa on -ctk f16 -ctv f16 -r 5
+```
+
+Run the **same model and benchmark options** as the 244.44 t/s bare-metal baseline; if its model differs, substitute that exact model in both tests. Record container throughput, absolute difference (`container − 244.44` t/s), and relative difference (`100 × difference / 244.44` %). Aim for roughly 1–2% parity within run variance. If it differs materially, inspect power mode, clocks, build flags, CPU/memory limits, library resolution, and GPU visibility before CUDA tuning. **These build, Pi sandbox, counter and parity checks have not yet been verified inside Docker on this host** (current user lacks Docker daemon access).
 
 ## Manage settings
 
