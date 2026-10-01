@@ -2,12 +2,14 @@
 # Sync the canonical files beside this script to host Pi, pi-docker, or both.
 set -Eeuo pipefail
 
-VERSION=2.0.0
+VERSION=2.1.0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_AGENT="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker/agent"
 TARGET=host
 YES=0
 INSTALL_PACKAGES=0
+CHECK=0
+RESTORE=0
 
 usage() {
     cat <<'USAGE'
@@ -16,6 +18,8 @@ Usage: ./setup-pi-config.sh [--target host|docker|both] [--yes] [--install-packa
   --target host      Sync ~/.pi (the original behavior; default).
   --target docker    Sync the separate pi-docker agent directory.
   --target both      Sync both profiles.
+  --check            Report drift without changing anything (exit 1 if drift).
+  --restore          Restore target files from their .bak backups.
   --yes              Apply the previewed changes and make .bak backups without prompting.
   --install-packages Install missing Pi packages in the docker profile after syncing.
 
@@ -30,6 +34,8 @@ while (($#)); do
         --target) (($# >= 2)) || die '--target needs host, docker, or both.'; TARGET=$2; shift ;;
         --yes) YES=1 ;;
         --install-packages) INSTALL_PACKAGES=1 ;;
+        --check) CHECK=1 ;;
+        --restore) RESTORE=1 ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1" ;;
     esac
@@ -37,6 +43,9 @@ while (($#)); do
 done
 
 case "$TARGET" in host|docker|both) ;; *) die "Invalid target: $TARGET" ;; esac
+if ((CHECK)) && ((RESTORE)); then
+    die '--check and --restore are mutually exclusive.'
+fi
 if ((INSTALL_PACKAGES)) && [[ $TARGET == host ]]; then
     die '--install-packages requires --target docker or --target both.'
 fi
@@ -79,6 +88,45 @@ for ((i=0; i<${#SOURCES[@]}; i++)); do
         diff -u --label "existing: $dst" --label "archive: $(basename "$src")" "$dst" "$src" || [[ $? -eq 1 ]]
     fi
 done
+
+if ((CHECK)); then
+    drift=0
+    for status in "${STATUSES[@]}"; do
+        if [[ $status != OK ]]; then drift=$((drift+1)); fi
+    done
+    if ((drift)); then
+        printf '\nDrift detected: %d file(s) need syncing.\n' "$drift"
+        exit 1
+    fi
+    printf '\nIn sync: nothing to do.\n'
+    exit 0
+fi
+
+if ((RESTORE)); then
+    restorable=()
+    for ((i=0; i<${#SOURCES[@]}; i++)); do
+        if [[ -f ${DESTINATIONS[$i]}.bak ]]; then
+            restorable+=("${DESTINATIONS[$i]}")
+        fi
+    done
+    if (( ${#restorable[@]} == 0 )); then
+        printf 'Nothing to restore (no .bak backups for target %s).\n' "$TARGET"
+        exit 0
+    fi
+    printf '\nRestoring from backups:\n'
+    for dst in "${restorable[@]}"; do printf '  %s\n' "$dst"; done
+    if (( ! YES )); then
+        read -r -p 'Restore these files? [y/N] ' reply || reply=''
+        case "$reply" in [Yy]|[Yy][Ee][S]) ;; *) printf 'Aborted.\n'; exit 0 ;; esac
+    fi
+    for dst in "${restorable[@]}"; do
+        cp -- "$dst.bak" "$dst"
+        rm -f "$dst.bak"
+        printf '[RESTORED] %s\n' "$dst"
+    done
+    printf '\nRestore complete.\n'
+    exit 0
+fi
 
 BACKUP=1
 if (( ! YES )); then
