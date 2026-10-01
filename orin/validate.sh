@@ -87,8 +87,11 @@ fi
 
 if [[ ${PI_DOCKER_ORIN_PROFILE:-0} == 1 ]]; then
     # Separate target execution, profiler availability, and counter-access errors.
-    if ! ncu --metrics sm__cycles_active.avg --csv --log-file "$scratch/ncu.csv" "$scratch/probe" >"$scratch/ncu-stdout" 2>"$scratch/ncu-stderr"; then
-        if grep -Eqi 'ERR_NVGPUCTRPERM|permission|not permitted|counter.*access' "$scratch/ncu.csv" "$scratch/ncu-stderr" "$scratch/ncu-stdout" 2>/dev/null; then
+    # On this Jetson, SYS_ADMIN is needed on the profiling process itself:
+    # host ncu succeeds as root but fails as the regular user, even with an
+    # ambient SYS_ADMIN capability. Elevate only ncu, not the Pi session.
+    if ! sudo -n /usr/local/cuda-13.2/bin/ncu --metrics sm__cycles_active.avg --csv "$scratch/probe" >"$scratch/ncu.csv" 2>"$scratch/ncu-stderr"; then
+        if grep -Eqi 'ERR_NVGPUCTRPERM|permission|not permitted|counter.*access' "$scratch/ncu.csv" "$scratch/ncu-stderr" 2>/dev/null; then
             fail 'Nsight Compute cannot access GPU performance counters (check host driver restrictions and SYS_ADMIN)'
         fi
         printf 'Nsight Compute diagnostics:\n' >&2
