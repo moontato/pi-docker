@@ -12,8 +12,7 @@ LAUNCHER="$BIN_DIR/pi-docker"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CONFIGS_DIR="$SCRIPT_DIR/pi_configs"
 DOCKERFILE="$CONFIG_DIR/Dockerfile"
-SEARXNG_CONFIG="$CONFIG_DIR/searxng-url"
-LLAMA_CONFIG="$CONFIG_DIR/llama-url"
+ENV_FILE="$CONFIG_DIR/env"
 REBUILD=0
 FORCE=0
 SEARXNG_URL_ARG=''
@@ -28,6 +27,9 @@ Usage: ./install-pi-docker.sh [--rebuild] [--force] [--searxng-url URL] [--llama
   --force    Replace conflicting files or image tag deliberately.
   --searxng-url URL  Override the SearXNG URL; default is searxngBaseUrl in pi_configs/web-search.json.
   --llama-url URL    Override the llama.cpp router URL; default is the defaultProvider's baseUrl in pi_configs/models.json.
+
+URLs, keys, and resource limits are stored in ~/.config/pi-docker/env
+(manage them with: pi-docker config; see pi-docker --help).
 
 Requires a working Docker daemon; does not install Docker.
 jq is required to derive the URLs from pi_configs/ when the flags are omitted.
@@ -49,9 +51,50 @@ require_jq() {
     command -v jq >/dev/null || die 'jq is required to derive URLs from pi_configs/*.json; install jq or pass --searxng-url/--llama-url explicitly.'
 }
 
-save_url_file() {
-    printf '%s\n' "$2" > "$work_dir/url"
-    install -m 600 "$work_dir/url" "$1"
+# --- Saved settings: ENV_FILE holds one KEY=VALUE per line (mode 600). ---
+
+env_file_get() {
+    local line
+    [[ -f $ENV_FILE ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == "$1="* ]]; then
+            printf '%s' "${line#*=}"
+            return 0
+        fi
+    done < "$ENV_FILE"
+    return 0
+}
+
+env_file_set() {
+    local key=$1 value=$2 line tmp
+    tmp=$(mktemp)
+    if [[ -f $ENV_FILE ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line != "$key="* ]]; then
+                printf '%s\n' "$line" >> "$tmp"
+            fi
+        done < "$ENV_FILE"
+    fi
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    install -m 600 "$tmp" "$ENV_FILE"
+    rm -f "$tmp"
+}
+
+migrate_legacy_url_files() {
+    local pair file key value
+    for pair in "searxng-url:SEARXNG_URL" "llama-url:LLAMA_BASE_URL"; do
+        file="$CONFIG_DIR/${pair%%:*}"
+        key="${pair#*:}"
+        if [[ -f $file ]]; then
+            value=''
+            IFS= read -r value < "$file" || true
+            if [[ -z $(env_file_get "$key") && -n $value ]]; then
+                env_file_set "$key" "$value"
+                printf 'Migrated %s into %s\n' "$file" "$ENV_FILE"
+            fi
+            rm -f "$file"
+        fi
+    done
 }
 
 while (($#)); do
@@ -145,7 +188,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v2.1)
+# Managed by install-pi-docker.sh (v3)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -154,19 +197,350 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
 TAILNET=1
-while (($#)) && [[ ${1:-} == --tailnet || ${1:-} == --no-tailnet ]]; do
-    if [[ $1 == --no-tailnet ]]; then
-        TAILNET=0
+PROJECT_DIR=''
+ENV_FILE="$CONFIG_DIR/env"
+
+config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
+
+die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Usage: pi-docker [options] [pi args...]
+       pi-docker config [list|get|set|unset] [KEY [VALUE]]
+       pi-docker doctor
+
+Options:
+  --tailnet          Use the host network and Tailscale DNS (default).
+  --no-tailnet       Use Docker's normal network instead.
+  --project DIR      Bind DIR as /workspace instead of the current directory.
+  -h, --help         Show this help.
+
+Commands:
+  config             Manage settings saved in ~/.config/pi-docker/env:
+                       pi-docker config list           show settings (keys masked)
+                       pi-docker config get KEY        show one value
+                       pi-docker config set KEY VALUE  save a value
+                       pi-docker config unset KEY      remove a value
+  doctor             Check Docker, image, packages, settings, and network.
+
+Recognized settings (shell environment always wins over saved values):
+  SEARXNG_URL, LLAMA_BASE_URL, LLAMA_API_KEY, PI_DOCKER_MEMORY, PI_DOCKER_CPUS,
+  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY,
+  GROQ_API_KEY.
+
+Known options are consumed; everything else is passed to Pi unchanged.
+USAGE
+}
+
+# --- Saved settings: ENV_FILE holds one KEY=VALUE per line (mode 600). ---
+
+env_get() {
+    local line
+    [[ -f $ENV_FILE ]] || return 0
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == "$1="* ]]; then
+            printf '%s' "${line#*=}"
+            return 0
+        fi
+    done < "$ENV_FILE"
+    return 0
+}
+
+env_set() {
+    local key=$1 value=$2 line tmp
+    tmp=$(mktemp)
+    if [[ -f $ENV_FILE ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line != "$key="* ]]; then
+                printf '%s\n' "$line" >> "$tmp"
+            fi
+        done < "$ENV_FILE"
     fi
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    install -m 600 "$tmp" "$ENV_FILE"
+    rm -f "$tmp"
+}
+
+env_unset() {
+    local key=$1 line tmp found=0
+    tmp=$(mktemp)
+    if [[ -f $ENV_FILE ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line == "$key="* ]]; then
+                found=1
+            else
+                printf '%s\n' "$line" >> "$tmp"
+            fi
+        done < "$ENV_FILE"
+        if (( found )); then
+            install -m 600 "$tmp" "$ENV_FILE"
+        fi
+    fi
+    rm -f "$tmp"
+    (( found ))
+}
+
+is_config_key() {
+    local key
+    for key in $config_keys; do
+        if [[ $key == "$1" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_valid_url() {
+    [[ $1 =~ ^https?://[^[:space:]]+$ ]] && [[ $1 != *'<'* && $1 != *'>'* ]]
+}
+
+config_set() {
+    local key=$1 value=$2
+    is_config_key "$key" || die "Unknown setting: $key"
+    if [[ -z $value ]]; then
+        die "Value for $key must not be empty."
+    fi
+    case $key in
+        SEARXNG_URL|LLAMA_BASE_URL)
+            is_valid_url "$value" || die "$key must be a URL like https://host:port, with no whitespace or angle brackets."
+            ;;
+        PI_DOCKER_MEMORY)
+            [[ $value =~ ^[0-9]+(\.[0-9]+)?([bkmgBKMGtT])?$ ]] || die "PI_DOCKER_MEMORY must be a number with an optional b/k/m/g/t suffix (e.g. 8g)."
+            ;;
+        PI_DOCKER_CPUS)
+            [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "PI_DOCKER_CPUS must be a number (e.g. 4 or 2.5)."
+            ;;
+    esac
+    mkdir -p "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+    env_set "$key" "$value"
+    printf 'Saved %s to %s\n' "$key" "$ENV_FILE"
+}
+
+config_get() {
+    local key=$1 value
+    is_config_key "$key" || die "Unknown setting: $key"
+    value=$(env_get "$key")
+    if [[ -z $value ]]; then
+        die "$key is not set (pi-docker config set $key VALUE)"
+    fi
+    printf '%s\n' "$value"
+}
+
+config_unset() {
+    local key=$1
+    is_config_key "$key" || die "Unknown setting: $key"
+    env_unset "$key" || die "$key is not set."
+    printf 'Removed %s from %s\n' "$key" "$ENV_FILE"
+}
+
+config_list() {
+    local line key
+    if [[ ! -f $ENV_FILE ]]; then
+        printf 'No saved settings (pi-docker config set KEY VALUE).\n'
+        return 0
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        key=${line%%=*}
+        case $key in
+            *API_KEY) printf '%s=***\n' "$key" ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done < "$ENV_FILE"
+}
+
+run_config() {
+    local cmd=${1:-list}
+    if (( $# > 0 )); then shift; fi
+    case $cmd in
+        list) config_list ;;
+        get)
+            (( $# == 1 )) || die 'Usage: pi-docker config get KEY'
+            config_get "$1"
+            ;;
+        set)
+            (( $# == 2 )) || die 'Usage: pi-docker config set KEY VALUE'
+            config_set "$1" "$2"
+            ;;
+        unset)
+            (( $# == 1 )) || die 'Usage: pi-docker config unset KEY'
+            config_unset "$1"
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "Unknown config command: $cmd (expected list, get, set, or unset)" ;;
+    esac
+    exit 0
+}
+
+# One-time migration from the pre-v3 URL files into the env file.
+migrate_legacy_url_files() {
+    local pair file key value
+    for pair in "searxng-url:SEARXNG_URL" "llama-url:LLAMA_BASE_URL"; do
+        file="$CONFIG_DIR/${pair%%:*}"
+        key="${pair#*:}"
+        if [[ -f $file ]]; then
+            value=''
+            IFS= read -r value < "$file" || true
+            if [[ -z $(env_get "$key") && -n $value ]]; then
+                env_set "$key" "$value"
+                printf 'Migrated %s into %s\n' "$file" "$ENV_FILE"
+            fi
+            rm -f "$file"
+        fi
+    done
+}
+
+# --- Health checks ---
+
+DOCTOR_PASS=0
+DOCTOR_FAIL=0
+
+doc_ok()   { printf '  [ok]   %s\n' "$1"; DOCTOR_PASS=$((DOCTOR_PASS + 1)); }
+doc_bad()  { printf '  [FAIL] %s\n' "$1"; DOCTOR_FAIL=$((DOCTOR_FAIL + 1)); }
+doc_note() { printf '  [note] %s\n' "$1"; }
+
+launcher_version() {
+    local v
+    v=$(sed -n '2s/^#.*(\(.*\))$/\1/p' "$0")
+    printf '%s' "${v:-unknown}"
+}
+
+doctor() {
+    local url key line label have_docker
+    printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
+
+    if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+        doc_ok 'Docker daemon reachable'
+        have_docker=1
+    else
+        doc_bad 'Docker daemon not reachable (is Docker installed and running?)'
+        have_docker=0
+    fi
+
+    if (( have_docker )); then
+        if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+            label=$(docker image inspect --format '{{ index .Config.Labels "io.pi-docker.installer" }}' "$IMAGE" 2>/dev/null || true)
+            if [[ -n $label ]]; then
+                doc_ok "Image $IMAGE present (managed, installer version $label)"
+            else
+                doc_bad "Image $IMAGE exists but is not managed by install-pi-docker.sh"
+            fi
+            if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg' >/dev/null 2>&1; then
+                doc_ok 'Image sandbox dependencies present (bwrap, socat, rg)'
+            else
+                doc_bad 'Image sandbox dependencies missing (rerun: ./install-pi-docker.sh --rebuild)'
+            fi
+        else
+            doc_bad "Image $IMAGE missing (run ./install-pi-docker.sh)"
+        fi
+    fi
+
+    doc_ok "Launcher version: $(launcher_version)"
+
+    for key in pi-permission-modes pi-ext-int-search; do
+        if [[ -d $AGENT_DIR/npm/node_modules/$key ]]; then
+            doc_ok "Package installed: $key"
+        else
+            doc_bad "Package missing: $key (rerun the installer, or: pi-docker install npm:$key)"
+        fi
+    done
+
+    for line in "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"; do
+        if [[ -d $line ]]; then
+            doc_ok "Directory: $line"
+        else
+            doc_bad "Directory missing: $line"
+        fi
+    done
+
+    if [[ -f $ENV_FILE ]]; then
+        doc_ok "Settings file: $ENV_FILE"
+        while IFS= read -r line || [[ -n $line ]]; do
+            key=${line%%=*}
+            case $key in
+                *API_KEY) doc_note "set: $key=***" ;;
+                *) doc_note "set: $line" ;;
+            esac
+        done < "$ENV_FILE"
+    else
+        doc_note 'No settings file yet (pi-docker config set KEY VALUE)'
+    fi
+
+    if command -v curl >/dev/null; then
+        for key in SEARXNG_URL LLAMA_BASE_URL; do
+            url=''
+            if [[ -v $key ]]; then url=${!key}; fi
+            if [[ -z $url ]]; then url=$(env_get "$key"); fi
+            if [[ -n $url ]]; then
+                if curl -s -o /dev/null --max-time 3 "$url"; then
+                    doc_ok "$key reachable: $url"
+                else
+                    doc_bad "$key not reachable: $url"
+                fi
+            else
+                doc_note "$key not configured"
+            fi
+        done
+    else
+        doc_note 'curl not found; skipping URL reachability checks'
+    fi
+
+    if command -v timeout >/dev/null; then
+        if timeout 2 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; then
+            doc_ok 'Tailscale DNS (100.100.100.100:53) reachable'
+        else
+            doc_bad 'Tailscale DNS unreachable (is tailscaled running? use --no-tailnet to fall back)'
+        fi
+    else
+        doc_note 'timeout not found; skipping Tailscale DNS probe'
+    fi
+
+    if [[ :$PATH: == *":$HOME/.local/bin:"* ]]; then
+        doc_ok '~/.local/bin on PATH'
+    else
+        doc_note "Add $HOME/.local/bin to PATH to run pi-docker by name"
+    fi
+
+    printf '\n%d passed, %d failed\n' "$DOCTOR_PASS" "$DOCTOR_FAIL"
+    if (( DOCTOR_FAIL > 0 )); then
+        return 1
+    fi
+    return 0
+}
+
+case ${1:-} in
+    config) shift; run_config "$@" ;;
+    doctor) doctor || exit 1; exit 0 ;;
+esac
+
+while (($#)); do
+    case $1 in
+        --tailnet) TAILNET=1 ;;
+        --no-tailnet) TAILNET=0 ;;
+        --project)
+            (( $# >= 2 )) || die '--project requires a directory.'
+            PROJECT_DIR=$2
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) break ;;
+    esac
     shift
 done
 
-[[ -d $PWD ]] || { echo 'Cannot locate the project directory.' >&2; exit 1; }
-mkdir -p "$AGENT_DIR" "$SANDBOX_HOME"
-chmod 700 "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+workdir_src=$(pwd -P)
+if [[ -n $PROJECT_DIR ]]; then
+    [[ -d $PROJECT_DIR ]] || die "Project directory not found: $PROJECT_DIR"
+    workdir_src=$(cd -- "$PROJECT_DIR" && pwd -P) || die "Cannot resolve project directory: $PROJECT_DIR"
+fi
+
+mkdir -p "$CONFIG_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+migrate_legacy_url_files
 
 args=(run --rm --init --pids-limit=512
-    --mount "type=bind,source=$(pwd -P),target=/workspace"
+    --mount "type=bind,source=$workdir_src,target=/workspace"
     --mount "type=bind,source=$AGENT_DIR,target=/pi-agent"
     --mount "type=bind,source=$SANDBOX_HOME,target=/home/pi"
     --workdir /workspace
@@ -184,17 +558,16 @@ if ((TAILNET)); then
 fi
 
 searxng_url=${SEARXNG_URL:-}
-if [[ -z $searxng_url && -f $CONFIG_DIR/searxng-url ]]; then
-    IFS= read -r searxng_url < "$CONFIG_DIR/searxng-url" || true
-fi
+if [[ -z $searxng_url ]]; then searxng_url=$(env_get SEARXNG_URL); fi
 [[ -z $searxng_url ]] || args+=(--env "SEARXNG_URL=$searxng_url")
 
 llama_url=${LLAMA_BASE_URL:-}
-if [[ -z $llama_url && -f $CONFIG_DIR/llama-url ]]; then
-    IFS= read -r llama_url < "$CONFIG_DIR/llama-url" || true
-fi
+if [[ -z $llama_url ]]; then llama_url=$(env_get LLAMA_BASE_URL); fi
 [[ -z $llama_url ]] || args+=(--env "LLAMA_BASE_URL=$llama_url")
-[[ -z ${LLAMA_API_KEY:-} ]] || args+=(--env LLAMA_API_KEY)
+
+llama_key=${LLAMA_API_KEY:-}
+if [[ -z $llama_key ]]; then llama_key=$(env_get LLAMA_API_KEY); fi
+[[ -z $llama_key ]] || args+=(--env "LLAMA_API_KEY=$llama_key")
 
 [[ -t 0 ]] && args+=(--interactive)
 [[ -t 0 && -t 1 ]] && args+=(--tty)
@@ -202,13 +575,19 @@ fi
 # Pass only explicitly selected provider keys; do not forward the whole host environment.
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY \
     GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY; do
-    if [[ -v $key && -n ${!key} ]]; then
-        args+=(--env "$key")
-    fi
+    value=''
+    if [[ -v $key ]]; then value=${!key}; fi
+    if [[ -z $value ]]; then value=$(env_get "$key"); fi
+    if [[ -n $value ]]; then args+=(--env "$key=$value"); fi
 done
 
-[[ -z ${PI_DOCKER_MEMORY:-} ]] || args+=(--memory "$PI_DOCKER_MEMORY")
-[[ -z ${PI_DOCKER_CPUS:-} ]] || args+=(--cpus "$PI_DOCKER_CPUS")
+memory=${PI_DOCKER_MEMORY:-}
+if [[ -z $memory ]]; then memory=$(env_get PI_DOCKER_MEMORY); fi
+[[ -z $memory ]] || args+=(--memory "$memory")
+
+cpus=${PI_DOCKER_CPUS:-}
+if [[ -z $cpus ]]; then cpus=$(env_get PI_DOCKER_CPUS); fi
+[[ -z $cpus ]] || args+=(--cpus "$cpus")
 
 exec docker "${args[@]}" "$IMAGE" "$@"
 LAUNCHER_CONTENT
@@ -228,6 +607,11 @@ check_file() {
             # Exact v2 launcher can be upgraded while preserving customized copies.
             if [[ $destination == "$LAUNCHER" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 6f53b50b526db4d3a081802589bf79552bf3790cd94a5eeed57a82395bc95044 ]]; then
+                return
+            fi
+            # Exact v2.1 launcher can be upgraded while preserving customized copies.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
@@ -253,10 +637,13 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR/agent" "$DATA_DIR/home" "$BIN_DIR"
-chmod 700 "$DATA_DIR" "$DATA_DIR/agent" "$DATA_DIR/home"
+chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/agent" "$DATA_DIR/home"
+migrate_legacy_url_files
+
 # URL flags override; otherwise derive from the pi_configs/ files next to this script.
 if ((SET_SEARXNG)); then
-    save_url_file "$SEARXNG_CONFIG" "$SEARXNG_URL_ARG"
+    env_file_set SEARXNG_URL "$SEARXNG_URL_ARG"
+    printf 'Saved SEARXNG_URL to %s\n' "$ENV_FILE"
 elif [[ -f $CONFIGS_DIR/web-search.json ]]; then
     require_jq
     derived=$(jq -r '.searxngBaseUrl // empty' "$CONFIGS_DIR/web-search.json" 2>/dev/null) || {
@@ -264,16 +651,17 @@ elif [[ -f $CONFIGS_DIR/web-search.json ]]; then
         derived=''
     }
     if is_real_url "$derived"; then
-        save_url_file "$SEARXNG_CONFIG" "$derived"
+        env_file_set SEARXNG_URL "$derived"
         printf 'SearXNG URL from pi_configs/web-search.json: %s\n' "$derived"
-    elif [[ -f $SEARXNG_CONFIG ]]; then
+    elif [[ -n $(env_file_get SEARXNG_URL) ]]; then
         printf 'Keeping previously saved SearXNG URL.\n'
     else
         printf 'No SearXNG URL found; set searxngBaseUrl in pi_configs/web-search.json or pass --searxng-url URL.\n' >&2
     fi
 fi
 if ((SET_LLAMA)); then
-    save_url_file "$LLAMA_CONFIG" "$LLAMA_URL_ARG"
+    env_file_set LLAMA_BASE_URL "$LLAMA_URL_ARG"
+    printf 'Saved LLAMA_BASE_URL to %s\n' "$ENV_FILE"
 elif [[ -f $CONFIGS_DIR/models.json ]]; then
     require_jq
     provider=$(jq -r '.defaultProvider // empty' "$CONFIGS_DIR/settings.json" 2>/dev/null) || provider=''
@@ -286,9 +674,9 @@ elif [[ -f $CONFIGS_DIR/models.json ]]; then
     derived=${derived%/}
     derived=${derived%/v1}
     if is_real_url "$derived"; then
-        save_url_file "$LLAMA_CONFIG" "$derived"
+        env_file_set LLAMA_BASE_URL "$derived"
         printf 'Llama URL from pi_configs/models.json: %s\n' "$derived"
-    elif [[ -f $LLAMA_CONFIG ]]; then
+    elif [[ -n $(env_file_get LLAMA_BASE_URL) ]]; then
         printf 'Keeping previously saved llama URL.\n'
     else
         printf 'No llama URL found; set a provider baseUrl in pi_configs/models.json or pass --llama-url URL.\n' >&2
@@ -341,7 +729,7 @@ if [[ -f $DATA_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$
     printf 'Note: @oresk/pi-searxng also declares web_search; consider removing it if both tools conflict.\n' >&2
 fi
 
-printf '\nReady: %s\nRun `pi-docker` from a project directory.\n' "$LAUNCHER"
+printf '\nReady: %s\nRun `pi-docker` from a project directory (pi-docker --help lists options).\nCheck health anytime with: pi-docker doctor\n' "$LAUNCHER"
 if [[ :$PATH: != *":$BIN_DIR:"* ]]; then
     printf 'Add %s to your PATH to use `pi-docker` by name.\n' "$BIN_DIR"
 fi
