@@ -1,0 +1,12 @@
+{
+  "baseline_ts": 244.44,
+  "measured_ts": 244.144465,
+  "delta_ts": -0.295535000000001,
+  "delta_percent": -0.12090288005236499,
+  "reported_stddev_ts": 0.008365,
+  "stddev_ts_squared": 6.997322499999998e-05,
+  "reported_stddev_ns": 574808,
+  "repetitions": 7,
+  "source_commit": "def4d406ae2c2f39573120d68730fbb7760b24bf",
+  "parity_within_2_percent": true
+}

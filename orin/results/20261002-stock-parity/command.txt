@@ -1,0 +1,1 @@
+/workspace/.worktrees/container-baseline/build-container/bin/llama-bench -m /models/Qwen3.8-27B-UD-Q4_K_XL.gguf -p 4096 -n 0 -b 2048 -ub 512 -ngl 999 -fa on -ctk f16 -ctv f16 -r 7 -o json -oe md
