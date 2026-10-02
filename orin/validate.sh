@@ -9,9 +9,13 @@ command -v findmnt >/dev/null || fail 'findmnt is required to check bind mount p
 for spec in '/workspace:rw' '/models:ro'; do
     mountpoint=${spec%:*}
     expected=${spec#*:}
-    target=$(findmnt -n -o TARGET -T "$mountpoint") || fail "cannot inspect $mountpoint mount"
+    # Bubblewrap stacks its own bind over Docker's bind: findmnt reports both.
+    # The last line is the effective mount inside the current namespace.
+    mounts=$(findmnt -n -o TARGET,OPTIONS -T "$mountpoint") || fail "cannot inspect $mountpoint mount"
+    effective=${mounts##*$'\n'}
+    target=${effective%% *}
+    options=${effective#* }
     [[ $target == "$mountpoint" ]] || fail "$mountpoint is not a dedicated bind mount (found $target)"
-    options=$(findmnt -n -o OPTIONS -T "$mountpoint") || fail "cannot inspect $mountpoint mount options"
     [[ ,$options, == *,"$expected",* ]] || fail "$mountpoint must be $expected: $options"
 done
 
@@ -95,7 +99,7 @@ if [[ ${PI_DOCKER_ORIN_PROFILE:-0} == 1 ]]; then
             fail 'Nsight Compute cannot access GPU performance counters (check host driver restrictions and SYS_ADMIN)'
         fi
         printf 'Nsight Compute diagnostics:\n' >&2
-        tail -20 "$scratch/ncu-stderr" "$scratch/ncu.csv" >&2 || true
+        tail -n 20 "$scratch/ncu-stderr" "$scratch/ncu.csv" >&2 || true
         fail 'Nsight Compute failed to profile the CUDA probe (check driver/tool compatibility)'
     fi
     if ! grep -Eq '"?sm__cycles_active\.avg"?,.*[0-9]' "$scratch/ncu.csv"; then

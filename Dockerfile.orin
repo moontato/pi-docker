@@ -16,7 +16,9 @@ COPY --from=node /usr/local /usr/local
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 COPY orin/entrypoint.sh /usr/local/bin/pi-docker-orin-entrypoint
 COPY orin/validate.sh /usr/local/bin/pi-docker-orin-validate
-RUN chmod 0755 /usr/local/bin/pi-docker-orin-*
+# Orin-only shim; never replace the regular Pi image's bubblewrap binary.
+COPY orin/bwrap-gpu.sh /usr/local/bin/bwrap
+RUN chmod 0755 /usr/local/bin/pi-docker-orin-* /usr/local/bin/bwrap
 ENV CUDA_HOME=/usr/local/cuda-13.2 \
     CUDAToolkit_ROOT=/usr/local/cuda-13.2 \
     PATH=/usr/local/cuda-13.2/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

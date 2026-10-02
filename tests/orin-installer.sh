@@ -13,14 +13,20 @@ if [[ ${1:-} == image && ${2:-} == inspect ]]; then
     if [[ ${3:-} == --format ]]; then printf '2\n'; fi
     exit 0
 fi
+if [[ ${1:-} == version ]]; then printf '29.8.0\n'; exit 0; fi
 case ${1:-} in info|run|build) exit 0 ;; esac
 exit 1
+MOCK
+cat > "$tmp/bin/sudo" <<'MOCK'
+#!/usr/bin/env bash
+# Never actually install/replace a host AppArmor policy during mock tests.
+printf 'sudo %s\n' "$*" >> "$DOCKER_CALLS_LOG"
 MOCK
 cat > "$tmp/bin/uname" <<'MOCK'
 #!/usr/bin/env bash
 if [[ $1 == -m ]]; then echo aarch64; else /usr/bin/uname "$@"; fi
 MOCK
-chmod +x "$tmp/bin/docker" "$tmp/bin/uname"
+chmod +x "$tmp/bin/docker" "$tmp/bin/uname" "$tmp/bin/sudo"
 export HOME="$tmp" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data"
 export PATH="$tmp/bin:$PATH" DOCKER_CALLS_LOG="$tmp/calls"
 "$repo/install-pi-docker.sh" >"$tmp/normal.out" 2>&1
@@ -29,5 +35,7 @@ export PATH="$tmp/bin:$PATH" DOCKER_CALLS_LOG="$tmp/calls"
 "$repo/install-pi-docker.sh" --install-orin >"$tmp/orin.out" 2>&1
 [[ $(grep -c 'Dockerfile.orin' "$tmp/calls") == 1 ]]
 grep -q 'local/pi-docker:orin-sm87' "$tmp/calls"
+grep -q 'sudo apparmor_parser -r /etc/apparmor.d/pi-docker-orin' "$tmp/calls"
+[[ -s "$tmp/config/pi-docker/orin-seccomp-docker29-arm64.json" ]]
 ! grep -q 'build --tag local/pi-docker:latest' "$tmp/calls"
 printf 'installer opt-in checks passed\n'

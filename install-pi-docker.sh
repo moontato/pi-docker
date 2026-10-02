@@ -552,6 +552,8 @@ if (( ORIN_MODE )); then
     done
     [[ -f /mnt/ssd/llama-orin-test/CMakeLists.txt ]] || die 'llama.cpp development tree is missing CMakeLists.txt.'
     [[ -x /usr/local/cuda-13.2/bin/nvcc ]] || die 'CUDA 13.2 nvcc is missing.'
+    [[ $(docker version --format '{{.Server.Version}}' 2>/dev/null) == 29.8.0 ]] || die 'Orin policy requires Docker Engine 29.8.0; review security profile compatibility before updating.'
+    [[ -f $CONFIG_DIR/orin-seccomp-docker29-arm64.json && ! -L $CONFIG_DIR/orin-seccomp-docker29-arm64.json ]] || die 'Orin seccomp policy missing; run ./install-pi-docker.sh --install-orin.'
     if (( ORIN_MODE == 2 )) && [[ ! -x /usr/local/cuda-13.2/bin/ncu || ! -d /opt/nvidia/nsight-compute || -L /opt/nvidia/nsight-compute ]]; then
         printf 'pi-docker: warning: Nsight Compute is unavailable; profiling validation will fail. CUDA development can still run.\n' >&2
     fi
@@ -586,6 +588,8 @@ args=(run --rm --init --pids-limit=512
 
 if (( ORIN_MODE )); then
     args+=(--runtime=nvidia
+        --security-opt "seccomp=$CONFIG_DIR/orin-seccomp-docker29-arm64.json"
+        --security-opt apparmor=pi-docker-orin
         --env NVIDIA_VISIBLE_DEVICES=all
         --env NVIDIA_DRIVER_CAPABILITIES=compute,utility
         --mount 'type=bind,source=/usr/local/cuda-13.2,target=/usr/local/cuda-13.2,readonly'
@@ -765,6 +769,7 @@ fi
 
 if (( INSTALL_ORIN )); then
     [[ $(uname -m) == aarch64 ]] || die '--install-orin requires an aarch64 host.'
+    bash "$SCRIPT_DIR/orin/install-security.sh" "$CONFIG_DIR" || die 'Could not install Orin security profiles.'
     # Separate tag: never replace the default managed image.
     docker build --file "$SCRIPT_DIR/Dockerfile.orin" --tag "$ORIN_IMAGE" "$SCRIPT_DIR" \
         || die 'Could not build the Orin image.'
