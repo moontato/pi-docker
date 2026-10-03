@@ -38,7 +38,7 @@ The current directory is writable inside Pi as `/workspace`, or pass `pi-docker 
 
 ## Manage settings
 
-Service URLs, API keys, and resource limits live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
+Service URLs, API keys, resource limits, and optional host-network DNS live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
 
 ```bash
 pi-docker config list                 # show saved settings (API keys masked)
@@ -48,12 +48,44 @@ pi-docker config get SEARXNG_URL
 pi-docker config unset GROQ_API_KEY
 ```
 
-Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, `PI_DOCKER_DNS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+
+### DNS and OpenAI subscription login
+
+Host networking is enabled by default (`--tailnet`). Without an override it still uses Tailscale DNS (`100.100.100.100`). If private services resolve but OpenAI login reports `fetch failed` / `EAI_AGAIN`, check whether that resolver can resolve public domains. Configure a working resolver without rebuilding the image:
+
+```bash
+# Only if this host has a working systemd-resolved stub:
+pi-docker config set PI_DOCKER_DNS 127.0.0.53
+pi-docker
+# Inside Pi: /login, then select ChatGPT/Codex.
+```
+
+`PI_DOCKER_DNS` accepts one canonical dotted-quad IPv4 address. The shell environment takes precedence over the saved value; otherwise the original Tailscale default remains. IPv6, hostnames, and multiple servers are not currently accepted. Choose a resolver that handles both public authentication endpoints and your private services: public DNS servers may not resolve tailnet names.
+
+A loopback resolver such as `127.0.0.53` works only when the host actually runs it and the container uses **host networking**. `--no-tailnet` ignores this setting and retains Docker's bridge networking/DNS. Bridge mode may resolve public endpoints while losing private tailnet names, and OAuth browser callbacks may require pasting the redirect URL into Pi when prompted.
+
+Restart the container after changing DNS. This does not modify host DNS, credentials, clipboard access, images, or sandbox policies. It changes which resolver's routing/privacy policy you use within the existing host-network boundary. Login still requires your approval; successful credentials persist in the private mounted Pi profile. Do not commit them or share authorization codes.
+
+To restore the original resolver, run `pi-docker config unset PI_DOCKER_DNS` and restart.
+
+### Copy text from the TUI
+
+Hold **Shift before starting a mouse drag** to use your terminal's native selection, then use its Copy command (often Ctrl+Shift+C on Linux/Windows or Cmd+C on macOS). Pressing Ctrl+Shift+C while Pi owns the highlight may not copy anything. Most terminals support this mouse override, though the exact modifier can vary.
+
+Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not that the terminal accepted it. Terminal/SSH/multiplexer support determines whether that request reaches your clipboard. Native terminal selection avoids needing desktop clipboard sockets or broader container permissions.
 
 ## Check health
 
-`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, Tailscale DNS, and PATH, and exits nonzero when anything fails.
+`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, the selected host-network DNS server's TCP port, and PATH, and exits nonzero when anything fails.
+
+The local regression checks use fake Docker and isolated profiles; they do not require a daemon or change your installation:
+
+```bash
+bash tests/launcher.sh
+bash tests/installer.sh
+```
 
 ## Later
 
-Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and uses Tailscale DNS by default; pass `--no-tailnet` to use Docker's normal network instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and uses `PI_DOCKER_DNS` when configured, otherwise Tailscale DNS; pass `--no-tailnet` to use Docker's normal network instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
