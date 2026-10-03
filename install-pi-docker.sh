@@ -192,7 +192,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v4)
+# Managed by install-pi-docker.sh (v4.1)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -207,7 +207,7 @@ ORIN_MODE=0
 ORIN_VALIDATE=0
 ENV_FILE="$CONFIG_DIR/env"
 
-config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
+config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS PI_DOCKER_DNS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
 
 die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
 
@@ -218,7 +218,7 @@ Usage: pi-docker [options] [pi args...]
        pi-docker doctor
 
 Options:
-  --tailnet          Use the host network and Tailscale DNS (default).
+  --tailnet          Use host networking (default); DNS is PI_DOCKER_DNS or Tailscale.
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
   --orin             Jetson AGX Orin CUDA development (no extra capabilities).
@@ -236,7 +236,7 @@ Commands:
 
 Recognized settings (shell environment always wins over saved values):
   SEARXNG_URL, LLAMA_BASE_URL, LLAMA_API_KEY, PI_DOCKER_MEMORY, PI_DOCKER_CPUS,
-  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY,
+  PI_DOCKER_DNS (one IPv4 resolver, host-network mode only), ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY,
   GROQ_API_KEY.
 
 Known options are consumed; everything else is passed to Pi unchanged.
@@ -305,6 +305,26 @@ is_valid_url() {
     [[ $1 =~ ^https?://[^[:space:]]+$ ]] && [[ $1 != *'<'* && $1 != *'>'* ]]
 }
 
+# A single numeric IPv4 address avoids shell interpretation and DNS bootstrap.
+is_valid_dns() {
+    local octet
+    local -a octets
+    [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [[ $octet == 0 || $octet != 0* ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+host_network_dns() {
+    local dns=${PI_DOCKER_DNS:-}
+    if [[ -z $dns ]]; then dns=$(env_get PI_DOCKER_DNS); fi
+    dns=${dns:-100.100.100.100}
+    is_valid_dns "$dns" || die 'PI_DOCKER_DNS must be one IPv4 address (e.g. 127.0.0.53).'
+    printf '%s' "$dns"
+}
+
 config_set() {
     local key=$1 value=$2
     is_config_key "$key" || die "Unknown setting: $key"
@@ -320,6 +340,9 @@ config_set() {
             ;;
         PI_DOCKER_CPUS)
             [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "PI_DOCKER_CPUS must be a number (e.g. 4 or 2.5)."
+            ;;
+        PI_DOCKER_DNS)
+            is_valid_dns "$value" || die 'PI_DOCKER_DNS must be one IPv4 address (e.g. 127.0.0.53).'
             ;;
     esac
     mkdir -p "$CONFIG_DIR"
@@ -417,7 +440,7 @@ launcher_version() {
 }
 
 doctor() {
-    local url key line label have_docker
+    local url key line label have_docker dns
     printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
 
     if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
@@ -496,14 +519,16 @@ doctor() {
         doc_note 'curl not found; skipping URL reachability checks'
     fi
 
+    dns=$(host_network_dns) || return 1
     if command -v timeout >/dev/null; then
-        if timeout 2 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; then
-            doc_ok 'Tailscale DNS (100.100.100.100:53) reachable'
+        if timeout 2 bash -c 'exec 3<>/dev/tcp/$1/53' _ "$dns" 2>/dev/null; then
+            doc_ok "Host-network DNS ($dns:53) reachable"
         else
-            doc_bad 'Tailscale DNS unreachable (is tailscaled running? use --no-tailnet to fall back)'
+            doc_bad "Host-network DNS ($dns:53) unreachable (check PI_DOCKER_DNS or use --no-tailnet)"
         fi
+        doc_note 'DNS probe checks TCP reachability only, not public/private name resolution.'
     else
-        doc_note 'timeout not found; skipping Tailscale DNS probe'
+        doc_note 'timeout not found; skipping host-network DNS probe'
     fi
 
     if [[ :$PATH: == *":$HOME/.local/bin:"* ]]; then
@@ -613,8 +638,9 @@ if (( ORIN_MODE )); then
 fi
 
 if ((TAILNET)); then
-    # This shares the host network namespace, including the host's local services.
-    args+=(--network=host --dns=100.100.100.100)
+    # Loopback resolvers work here because this shares the host network namespace.
+    dns=$(host_network_dns)
+    args+=(--network=host "--dns=$dns")
 fi
 
 searxng_url=${SEARXNG_URL:-}
@@ -677,6 +703,11 @@ check_file() {
             # Upgrade the exact v3 launcher automatically, without replacing user edits.
             if [[ $destination == "$LAUNCHER" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
+                return
+            fi
+            # Upgrade the exact v4 Orin launcher, preserving customized copies.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 34e8a6d4faa52d71721fc46339db64156e3a17713c892519cc298db040f2583b ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.

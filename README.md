@@ -98,7 +98,7 @@ Run the **same model and benchmark options** as the 244.44 t/s bare-metal baseli
 
 ## Manage settings
 
-Service URLs, API keys, and resource limits live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
+Service URLs, API keys, resource limits, and optional host-network DNS live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
 
 ```bash
 pi-docker config list                 # show saved settings (API keys masked)
@@ -108,12 +108,33 @@ pi-docker config get SEARXNG_URL
 pi-docker config unset GROQ_API_KEY
 ```
 
-Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, `PI_DOCKER_DNS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+
+### Host-network DNS and subscription login
+
+Host networking is enabled by default (`--tailnet`). Without an override it still uses Tailscale DNS (`100.100.100.100`), preserving the original behavior. Configure a single IPv4 resolver with:
+
+```bash
+pi-docker config set PI_DOCKER_DNS 127.0.0.53
+pi-docker --orin
+```
+
+Use `127.0.0.53` **only on a host with a working systemd-resolved stub**. It was verified on this Jetson to resolve public OpenAI authentication endpoints and private tailnet services; direct Tailscale DNS here resolved private names but failed public lookups, producing Node's `fetch failed` / `EAI_AGAIN`. This is a per-user setting for **all host-network launches**, not a universal default. An environment override such as `PI_DOCKER_DNS=1.1.1.1 pi-docker --orin` takes precedence, but public resolvers may not resolve private tailnet names. Addresses must be canonical dotted-quad IPv4; multiple servers, hostnames, and IPv6 are not currently accepted.
+
+`--no-tailnet` ignores this setting and retains Docker's normal bridge networking/DNS. A loopback resolver is usable in host-network mode because the container shares the host network namespace; it must not be injected into bridge mode. This DNS setting does not modify host DNS, credentials, images, GPU access or sandbox policies. It changes which resolver's routing/privacy policy the container uses; host networking itself remains the existing boundary.
+
+Fresh-launch host/bridge checks are recorded in [`orin/results/20261003-dns-checks.json`](orin/results/20261003-dns-checks.json). They used the launcher's real Docker flags with a non-root network probe, not a new OAuth login or model workload.
+
+Restart the container after changing this setting. Retry `/login` inside Pi; login tokens remain in the private persistent profile. To roll back to the original Tailscale resolver:
+
+```bash
+pi-docker config unset PI_DOCKER_DNS
+```
 
 ## Check health
 
-`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, Tailscale DNS, and PATH, and exits nonzero when anything fails.
+`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, the selected host-network DNS server's TCP port, and PATH, and exits nonzero when anything fails.
 
 ## Later
 
-Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and uses Tailscale DNS by default; pass `--no-tailnet` to use Docker's normal network instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and uses `PI_DOCKER_DNS` when configured, otherwise Tailscale DNS; pass `--no-tailnet` to use Docker's normal network instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.

@@ -1,0 +1,32 @@
+{
+  "date_utc": "2026-10-03",
+  "method": "Fresh containers launched with the installed pi-docker flags; a temporary Docker shim substituted a non-root Node connectivity probe for the Pi entrypoint. No login, tokens, model inference or GPU compute workload was used.",
+  "image_rebuilt": false,
+  "credentials_changed": false,
+  "host_dns_changed": false,
+  "host_network": {
+    "dns": "127.0.0.53",
+    "openai_auth_http_status": 200,
+    "private_model_dns": "OK",
+    "private_search_dns": "OK",
+    "runtime": "nvidia",
+    "apparmor": "pi-docker-orin",
+    "seccomp": "dedicated Orin policy",
+    "sys_admin_added": false,
+    "privileged": false,
+    "exit_code": 0
+  },
+  "bridge_network": {
+    "explicit_dns_override": null,
+    "openai_auth_http_status": 200,
+    "private_model_dns": "ENOTFOUND",
+    "private_search_dns": "ENOTFOUND",
+    "runtime": "nvidia",
+    "apparmor": "pi-docker-orin",
+    "seccomp": "dedicated Orin policy",
+    "sys_admin_added": false,
+    "privileged": false,
+    "exit_code": 0
+  },
+  "cleanup": "Diagnostic containers removed; existing user Pi container left running."
+}

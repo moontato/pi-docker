@@ -40,11 +40,60 @@ cat > "$tmp/bin/uname" <<'MOCK'
 #!/usr/bin/env bash
 if [[ $1 == -m ]]; then printf '%s\n' "${MOCK_ARCH:-aarch64}"; else /usr/bin/uname "$@"; fi
 MOCK
-chmod +x "$tmp/bin/docker" "$tmp/bin/uname"
+cat > "$tmp/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+# Do not open a real DNS socket during the synthetic doctor test.
+printf '%s\n' "$@" > "$TIMEOUT_ARGS_LOG"
+MOCK
+chmod +x "$tmp/bin/docker" "$tmp/bin/uname" "$tmp/bin/timeout"
 export HOME="$tmp" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data"
-export PATH="$tmp/bin:$PATH" DOCKER_ARGS_LOG="$tmp/args" DOCKER_CALLS_LOG="$tmp/calls"
+export PATH="$tmp/bin:$PATH" DOCKER_ARGS_LOG="$tmp/args" DOCKER_CALLS_LOG="$tmp/calls" TIMEOUT_ARGS_LOG="$tmp/timeout-args"
+unset PI_DOCKER_DNS
 mkdir -p "$tmp/config/pi-docker"
 : > "$tmp/config/pi-docker/orin-seccomp-docker29-arm64.json"
+# Host-network DNS is opt-in configurable; the original default stays unchanged.
+"$tmp/pi-docker"
+grep -qx -- '--network=host' "$tmp/args"
+grep -qx -- '--dns=100.100.100.100' "$tmp/args"
+! grep -q -e '--security-opt' -e '--runtime=nvidia' "$tmp/args"
+"$tmp/pi-docker" config set PI_DOCKER_DNS 127.0.0.53 > "$tmp/config.out"
+[[ $("$tmp/pi-docker" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
+"$tmp/pi-docker" config list | grep -qx 'PI_DOCKER_DNS=127.0.0.53'
+[[ $(stat -c %a "$tmp/config/pi-docker/env") == 600 ]]
+# Other doctor prerequisites are intentionally absent; check only its DNS probe.
+"$tmp/pi-docker" doctor > "$tmp/doctor.out" 2>&1 || true
+grep -q 'Host-network DNS (127.0.0.53:53) reachable' "$tmp/doctor.out"
+grep -qx '127.0.0.53' "$tmp/timeout-args"
+! grep -q '100.100.100.100' "$tmp/timeout-args"
+"$tmp/pi-docker" --orin
+grep -qx -- '--network=host' "$tmp/args"
+grep -qx -- '--dns=127.0.0.53' "$tmp/args"
+grep -qx -- 'apparmor=pi-docker-orin' "$tmp/args"
+! grep -q -e 'SYS_ADMIN' -e 'unconfined' -e '--privileged' "$tmp/args"
+PI_DOCKER_DNS=1.1.1.1 "$tmp/pi-docker"
+grep -qx -- '--dns=1.1.1.1' "$tmp/args"
+"$tmp/pi-docker" --no-tailnet --orin
+! grep -q -e '--network=host' -e '--dns=' "$tmp/args"
+PI_DOCKER_DNS=not-an-address "$tmp/pi-docker" --no-tailnet
+! grep -q -e '--network=host' -e '--dns=' "$tmp/args"
+for bad in '' 256.1.1.1 127.0.0 127.0.0.01 localhost '127.0.0.53 1.1.1.1' '$(touch INJECTED)'; do
+    : > "$tmp/calls"
+    if "$tmp/pi-docker" config set PI_DOCKER_DNS "$bad" > "$tmp/out" 2>&1; then
+        echo 'invalid DNS setting accepted' >&2; exit 1
+    fi
+    [[ $("$tmp/pi-docker" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
+    ! grep -qx run "$tmp/calls"
+done
+: > "$tmp/calls"
+if PI_DOCKER_DNS=256.0.0.1 "$tmp/pi-docker" > "$tmp/out" 2>&1; then
+    echo 'invalid environment DNS override accepted' >&2; exit 1
+fi
+! grep -qx run "$tmp/calls"
+grep -q 'PI_DOCKER_DNS must be one IPv4 address' "$tmp/out"
+"$tmp/pi-docker" config unset PI_DOCKER_DNS > "$tmp/config.out"
+"$tmp/pi-docker"
+grep -qx -- '--dns=100.100.100.100' "$tmp/args"
+: > "$tmp/calls"
 assert_fail() {
     : > "$tmp/calls"
     if "$tmp/pi-docker" --no-tailnet --orin >"$tmp/out" 2>&1; then echo 'expected launch failure' >&2; exit 1; fi
