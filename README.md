@@ -1,6 +1,6 @@
 # Pi in Docker
 
-Run Pi against one project at a time, with a separate persistent Pi profile and access to your Tailscale services.
+Run Pi against one project at a time, sharing your `~/.pi` profile with host Pi (logins, settings, sessions, packages), with access to your Tailscale services. Pass `pi-docker --isolated` to opt back into the old separate profile.
 
 ## Set up once
 
@@ -17,15 +17,15 @@ The installer builds the image, installs the Pi packages, and reads the SearXNG 
 
 **Note:** the URLs in `pi_configs/` are placeholders — replace them with your tailnet services' actual addresses before running the installer: the `llama-server` provider block in `models.json` (`baseUrl` and the `your-model-id` template model; duplicate the block for each additional llama server), `defaultProvider`, `defaultModel` and `modelOverrides` in `settings.json`, and `searxngBaseUrl` plus the `100.100.0.1/32` SSRF range in `web-search.json`.
 
-Sync the provided configuration into the Docker profile:
+Sync the provided configuration into the shared profile:
 
 ```bash
 cd pi_configs
-./setup-pi-config.sh --target docker --install-packages
+./setup-pi-config.sh --target host --install-packages
 cd ..
 ```
 
-The deployer shows changes and asks before copying. `--target host` copies to your regular host Pi profile; `--target both` copies to both. Its default is `host`. Use `--check` for a non-interactive drift report (exit 1 if drift), and `--restore` to roll the listed destinations back from their `.bak` backups.
+The deployer shows changes and asks before copying. Its default target is `host` (your `~/.pi` profile); `--target docker` and `--target both` are aliases, since pi-docker shares `~/.pi` by default. Use `--check` for a non-interactive drift report (exit 1 if drift), and `--restore` to roll the listed destinations back from their `.bak` backups.
 
 ## Open a project
 
@@ -35,6 +35,8 @@ pi-docker
 ```
 
 The current directory is writable inside Pi as `/workspace`, or pass `pi-docker --project DIR` to bind another directory. Use `/model` to choose a model and `/sandbox` to check permission-mode status. `pi-docker --help` lists all options. Run the config deployer again only when you change files in `pi_configs/`.
+
+By default pi-docker mounts your host `~/.pi` into the container, so host Pi and pi-docker are one profile: `/login` on either side (for example OpenAI Codex) updates the same `auth.json`, and settings, models, sessions, extensions, and packages are shared. The container's `HOME` itself stays private. Pass `--isolated` to use the old separate profile at `~/.local/share/pi-docker/agent` instead.
 
 ## Manage settings
 

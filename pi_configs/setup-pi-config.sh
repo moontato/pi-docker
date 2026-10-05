@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Sync the canonical files beside this script to host Pi, pi-docker, or both.
+# Sync the canonical files beside this script to the shared Pi profile (~/.pi),
+# used by both host Pi and pi-docker.
 set -Eeuo pipefail
 
-VERSION=2.1.0
+VERSION=3.0.0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOCKER_AGENT="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker/agent"
 TARGET=host
 YES=0
 INSTALL_PACKAGES=0
@@ -15,9 +15,9 @@ usage() {
     cat <<'USAGE'
 Usage: ./setup-pi-config.sh [--target host|docker|both] [--yes] [--install-packages]
 
-  --target host      Sync ~/.pi (the original behavior; default).
-  --target docker    Sync the separate pi-docker agent directory.
-  --target both      Sync both profiles.
+  --target host      Sync ~/.pi, the shared profile (default).
+  --target docker    Alias for host: pi-docker now shares ~/.pi by default.
+  --target both      Alias for host: there is a single shared profile.
   --check            Report drift without changing anything (exit 1 if drift).
   --restore          Restore target files from their .bak backups.
   --yes              Apply the previewed changes and make .bak backups without prompting.
@@ -46,31 +46,23 @@ case "$TARGET" in host|docker|both) ;; *) die "Invalid target: $TARGET" ;; esac
 if ((CHECK)) && ((RESTORE)); then
     die '--check and --restore are mutually exclusive.'
 fi
-if ((INSTALL_PACKAGES)) && [[ $TARGET == host ]]; then
-    die '--install-packages requires --target docker or --target both.'
-fi
 
 declare -a SOURCES=() DESTINATIONS=() STATUSES=()
 add_mapping() { SOURCES+=("$SCRIPT_DIR/$1"); DESTINATIONS+=("$2"); }
 
-if [[ $TARGET == host || $TARGET == both ]]; then
-    add_mapping models.json "$HOME/.pi/agent/models.json"
-    add_mapping settings.json "$HOME/.pi/agent/settings.json"
-    add_mapping permission-mode.json "$HOME/.pi/agent/permission-mode/permission-mode.json"
-    add_mapping friendly-model-footer.ts "$HOME/.pi/agent/extensions/friendly-model-footer.ts"
-    add_mapping web-search.json "$HOME/.pi/web-search.json"
-fi
-
-if [[ $TARGET == docker || $TARGET == both ]]; then
-    add_mapping models.json "$DOCKER_AGENT/models.json"
-    add_mapping settings.json "$DOCKER_AGENT/settings.json"
-    add_mapping permission-mode.json "$DOCKER_AGENT/permission-mode/permission-mode.json"
-    add_mapping friendly-model-footer.ts "$DOCKER_AGENT/extensions/friendly-model-footer.ts"
-    # pi-ext-int-search resolves this path via PI_CODING_AGENT_DIR=/pi-agent.
-    add_mapping web-search.json "$DOCKER_AGENT/web-search.json"
-fi
+# All targets now point at the shared profile: pi-docker mounts the host's
+# ~/.pi by default, so host Pi and pi-docker read the same files.
+# (pi-docker --isolated opts out; this deployer no longer touches that profile.)
+add_mapping models.json "$HOME/.pi/agent/models.json"
+add_mapping settings.json "$HOME/.pi/agent/settings.json"
+add_mapping permission-mode.json "$HOME/.pi/agent/permission-mode/permission-mode.json"
+add_mapping friendly-model-footer.ts "$HOME/.pi/agent/extensions/friendly-model-footer.ts"
+add_mapping web-search.json "$HOME/.pi/web-search.json"
 
 printf '\nPi Config Deployer v%s — target: %s\n\n' "$VERSION" "$TARGET"
+if [[ $TARGET != host ]]; then
+    printf 'Note: pi-docker shares the host profile %s by default, so --target docker and --target both are aliases for host.\n' "$HOME/.pi"
+fi
 for ((i=0; i<${#SOURCES[@]}; i++)); do
     src=${SOURCES[$i]}
     dst=${DESTINATIONS[$i]}
@@ -151,15 +143,15 @@ done
 if ((INSTALL_PACKAGES)); then
     command -v pi-docker >/dev/null || die 'pi-docker is not on PATH; install it before syncing packages.'
     for package in pi-permission-modes pi-ext-int-search; do
-        if [[ -d $DOCKER_AGENT/npm/node_modules/$package ]]; then
+        if [[ -d $HOME/.pi/agent/npm/node_modules/$package ]]; then
             printf '[INSTALLED] %s\n' "$package"
         else
             printf '[INSTALLING] %s\n' "$package"
             ( cd "$SCRIPT_DIR" && pi-docker install "npm:$package" ) || die "Failed to install $package. Rerun with --install-packages to retry."
-            if [[ ! -d $DOCKER_AGENT/npm/node_modules/$package ]]; then
+            if [[ ! -d $HOME/.pi/agent/npm/node_modules/$package ]]; then
                 ( cd "$SCRIPT_DIR" && pi-docker update "npm:$package" ) || die "Failed to reconcile $package. Rerun with --install-packages to retry."
             fi
-            [[ -d $DOCKER_AGENT/npm/node_modules/$package ]] || die "$package was not installed under the pi-docker agent directory. Check with pi-docker list and retry."
+            [[ -d $HOME/.pi/agent/npm/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
         fi
     done
 fi

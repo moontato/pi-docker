@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v3)
+# Managed by install-pi-docker.sh (v4)
 set -Eeuo pipefail
 umask 077
 
@@ -7,6 +7,7 @@ IMAGE=local/pi-docker:latest
 IMAGE_VERSION=2
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
+PI_DIR="$HOME/.pi"
 BIN_DIR="$HOME/.local/bin"
 LAUNCHER="$BIN_DIR/pi-docker"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -35,7 +36,9 @@ Requires a working Docker daemon; does not install Docker.
 jq is required to derive the URLs from pi_configs/ when the flags are omitted.
 pi-docker uses the host's Tailscale network and DNS by default;
 pass --no-tailnet to use Docker's normal network.
-Installs pi-permission-modes and pi-ext-int-search in the isolated Pi agent directory.
+pi-docker shares your ~/.pi profile with host Pi by default (logins, settings,
+sessions, packages); pass --isolated to pi-docker for the old separate profile.
+Installs pi-permission-modes and pi-ext-int-search into the shared Pi profile.
 The image includes bubblewrap, socat, and ripgrep for pi-permission-modes.
 USAGE
 }
@@ -188,15 +191,17 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v3)
+# Managed by install-pi-docker.sh (v4)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
-AGENT_DIR="$DATA_DIR/agent"
+PI_DIR="$HOME/.pi"
+ISOLATED_AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
 TAILNET=1
+ISOLATED=0
 PROJECT_DIR=''
 ENV_FILE="$CONFIG_DIR/env"
 
@@ -214,6 +219,8 @@ Options:
   --tailnet          Use the host network and Tailscale DNS (default).
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
+  --isolated         Use the separate profile at ~/.local/share/pi-docker/agent
+                     instead of sharing ~/.pi with host Pi.
   -h, --help         Show this help.
 
 Commands:
@@ -407,7 +414,7 @@ launcher_version() {
 }
 
 doctor() {
-    local url key line label have_docker
+    local url key line label have_docker doctor_agent_dir doctor_dirs
     printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
 
     if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
@@ -438,15 +445,24 @@ doctor() {
 
     doc_ok "Launcher version: $(launcher_version)"
 
+    if ((DOCTOR_ISOLATED)); then
+        doctor_agent_dir="$ISOLATED_AGENT_DIR"
+    else
+        doctor_agent_dir="$PI_DIR/agent"
+    fi
     for key in pi-permission-modes pi-ext-int-search; do
-        if [[ -d $AGENT_DIR/npm/node_modules/$key ]]; then
+        if [[ -d $doctor_agent_dir/npm/node_modules/$key ]]; then
             doc_ok "Package installed: $key"
         else
             doc_bad "Package missing: $key (rerun the installer, or: pi-docker install npm:$key)"
         fi
     done
 
-    for line in "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"; do
+    doctor_dirs=("$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR")
+    if ((DOCTOR_ISOLATED)); then
+        doctor_dirs+=("$ISOLATED_AGENT_DIR")
+    fi
+    for line in "${doctor_dirs[@]}"; do
         if [[ -d $line ]]; then
             doc_ok "Directory: $line"
         else
@@ -509,15 +525,28 @@ doctor() {
     return 0
 }
 
+DOCTOR_ISOLATED=0
 case ${1:-} in
     config) shift; run_config "$@" ;;
-    doctor) doctor || exit 1; exit 0 ;;
+    doctor)
+        shift
+        while (($#)); do
+            case $1 in
+                --isolated) DOCTOR_ISOLATED=1 ;;
+                -h|--help) usage; exit 0 ;;
+                *) die "Unknown doctor option: $1 (expected --isolated)" ;;
+            esac
+            shift
+        done
+        doctor || exit 1; exit 0
+        ;;
 esac
 
 while (($#)); do
     case $1 in
         --tailnet) TAILNET=1 ;;
         --no-tailnet) TAILNET=0 ;;
+        --isolated) ISOLATED=1 ;;
         --project)
             (( $# >= 2 )) || die '--project requires a directory.'
             PROJECT_DIR=$2
@@ -535,22 +564,38 @@ if [[ -n $PROJECT_DIR ]]; then
     workdir_src=$(cd -- "$PROJECT_DIR" && pwd -P) || die "Cannot resolve project directory: $PROJECT_DIR"
 fi
 
-mkdir -p "$CONFIG_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
-chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$AGENT_DIR" "$SANDBOX_HOME"
+if ((ISOLATED)); then
+    mkdir -p "$CONFIG_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
+    chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
+else
+    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
+    chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
+fi
 migrate_legacy_url_files
 
 args=(run --rm --init --pids-limit=512
     --mount "type=bind,source=$workdir_src,target=/workspace"
-    --mount "type=bind,source=$AGENT_DIR,target=/pi-agent"
     --mount "type=bind,source=$SANDBOX_HOME,target=/home/pi"
     --workdir /workspace
     --env HOME=/home/pi
-    --env PI_CODING_AGENT_DIR=/pi-agent
     --env PI_SKIP_VERSION_CHECK=1
     --env "PI_DOCKER_UID=$(id -u)"
     --env "PI_DOCKER_GID=$(id -g)"
     --env "TERM=${TERM:-xterm-256color}"
 )
+
+# Shared mode (default) mounts the host's ~/.pi into the container's home, so
+# host Pi and pi-docker use the same profile: auth.json, settings, models,
+# sessions, extensions, and npm packages all live in one place. /login on
+# either side updates the same credentials.
+# Isolated mode keeps the old separate profile at $DATA_DIR/agent.
+if ((ISOLATED)); then
+    args+=(--mount "type=bind,source=$ISOLATED_AGENT_DIR,target=/pi-agent"
+           --env PI_CODING_AGENT_DIR=/pi-agent)
+else
+    # Child mount comes after the parent so /home/pi/.pi lands on top of /home/pi.
+    args+=(--mount "type=bind,source=$PI_DIR,target=/home/pi/.pi")
+fi
 
 if ((TAILNET)); then
     # This shares the host network namespace, including the host's local services.
@@ -614,6 +659,11 @@ check_file() {
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
                 return
             fi
+            # Exact v3 launcher can be upgraded while preserving customized copies.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
             if [[ $destination == "$DOCKERFILE" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 553a25e729d82e38f7883f345d8b1b0672f15aa1aa70397a49d4b691967de8a0 ]]; then
@@ -636,8 +686,8 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     fi
 fi
 
-mkdir -p "$CONFIG_DIR" "$DATA_DIR/agent" "$DATA_DIR/home" "$BIN_DIR"
-chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/agent" "$DATA_DIR/home"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR/home" "$BIN_DIR" "$PI_DIR"
+chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/home" "$PI_DIR"
 migrate_legacy_url_files
 
 # URL flags override; otherwise derive from the pi_configs/ files next to this script.
@@ -710,22 +760,22 @@ fi
 
 "$LAUNCHER" --version || die 'Pi did not start; check the Docker build and runtime output above.'
 
-# Pi packages live under the separately mounted /pi-agent, not in the image.
+# Pi packages live under the shared ~/.pi profile, not in the image.
 # Skipping an installed package avoids network downloads on ordinary reruns.
 for package in pi-permission-modes pi-ext-int-search; do
-    if [[ -d $DATA_DIR/agent/npm/node_modules/$package ]]; then
+    if [[ -d $PI_DIR/agent/npm/node_modules/$package ]]; then
         printf 'Pi package already installed: %s\n' "$package"
     else
         printf 'Installing Pi package: %s\n' "$package"
         ( cd "$CONFIG_DIR" && "$LAUNCHER" install "npm:$package" ) || die "Could not install $package. Rerun the installer to retry."
-        if [[ ! -d $DATA_DIR/agent/npm/node_modules/$package ]]; then
+        if [[ ! -d $PI_DIR/agent/npm/node_modules/$package ]]; then
             ( cd "$CONFIG_DIR" && "$LAUNCHER" update "npm:$package" ) || die "Could not reconcile $package. Rerun the installer to retry."
         fi
-        [[ -d $DATA_DIR/agent/npm/node_modules/$package ]] || die "$package was not installed under the isolated Pi agent directory. Check with pi-docker list and retry."
+        [[ -d $PI_DIR/agent/npm/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
     fi
 done
 
-if [[ -f $DATA_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$DATA_DIR/agent/settings.json"; then
+if [[ -f $PI_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$PI_DIR/agent/settings.json"; then
     printf 'Note: @oresk/pi-searxng also declares web_search; consider removing it if both tools conflict.\n' >&2
 fi
 
