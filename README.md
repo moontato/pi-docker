@@ -54,8 +54,24 @@ Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_
 
 ## Check health
 
-`pi-docker doctor` checks the Docker daemon, the managed image and its sandbox dependencies, the installed Pi packages, saved settings, URL reachability, Tailscale DNS, and PATH, and exits nonzero when anything fails.
+`pi-docker doctor` checks Docker, image dependencies (including `fd`), packages, the selected profile's accessibility as your UID, saved settings, service URLs, DNS/HTTPS to GitHub and OpenAI **from the container**, and PATH. It exits nonzero when a check fails and never displays stored credentials. Use `pi-docker doctor --no-tailnet` or `pi-docker doctor --isolated` to check those modes.
+
+### Startup/authentication troubleshooting
+
+After updating this repository, run `./install-pi-docker.sh` again. The v5 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+
+The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
+
+If `No models available` remains, confirm you have logged in with host Pi (`pi`, then `/login`). Logins that exist only in the old isolated profile are not migrated automatically; use `--isolated` to keep using them. For `EAI_AGAIN`/`fetch failed`, run `pi-docker doctor` and compare with `pi-docker doctor --no-tailnet`.
 
 ## Later
 
-Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and uses Tailscale DNS by default; pass `--no-tailnet` to use Docker's normal network instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and bind-mounts the host's `/etc/resolv.conf` read-only to use its resolver (including Tailscale DNS); pass `--no-tailnet` to use Docker's normal network and DNS instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+
+## Tests
+
+Run offline regression tests (no Docker daemon or network required):
+
+```bash
+python3 -B -m unittest discover -s tests -v
+```

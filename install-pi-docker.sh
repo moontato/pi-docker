@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v4)
+# Managed by install-pi-docker.sh (v5)
 set -Eeuo pipefail
 umask 077
 
 IMAGE=local/pi-docker:latest
-IMAGE_VERSION=2
+IMAGE_VERSION=3
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 PI_DIR="$HOME/.pi"
@@ -34,12 +34,12 @@ URLs, keys, and resource limits are stored in ~/.config/pi-docker/env
 
 Requires a working Docker daemon; does not install Docker.
 jq is required to derive the URLs from pi_configs/ when the flags are omitted.
-pi-docker uses the host's Tailscale network and DNS by default;
+pi-docker uses the host network and resolver (including Tailscale DNS) by default;
 pass --no-tailnet to use Docker's normal network.
 pi-docker shares your ~/.pi profile with host Pi by default (logins, settings,
 sessions, packages); pass --isolated to pi-docker for the old separate profile.
 Installs pi-permission-modes and pi-ext-int-search into the shared Pi profile.
-The image includes bubblewrap, socat, and ripgrep for pi-permission-modes.
+The image includes fd, ripgrep, bubblewrap, and socat; no startup tool downloads are needed.
 USAGE
 }
 
@@ -140,10 +140,10 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
 cat >"$work_dir/Dockerfile" <<'DOCKERFILE_CONTENT'
-# Managed by install-pi-docker.sh (v2)
+# Managed by install-pi-docker.sh (v3)
 FROM node:24-bookworm-slim
 
-LABEL io.pi-docker.installer="2"
+LABEL io.pi-docker.installer="3"
 
 # sudo and gosu let Pi run as the host UID and install OS packages on demand.
 RUN apt-get update \
@@ -160,7 +160,8 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 # Keep these after Pi's npm layer so the one-time dependency upgrade can reuse
 # the cached base packages and Pi install. Docker's own security profile stays on.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap socat \
+    && apt-get install -y --no-install-recommends bubblewrap socat fd-find \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/pi-docker-entrypoint
@@ -172,7 +173,7 @@ DOCKERFILE_CONTENT
 
 cat >"$work_dir/entrypoint.sh" <<'ENTRYPOINT_CONTENT'
 #!/bin/sh
-# Managed by install-pi-docker.sh (v1)
+# Managed by install-pi-docker.sh (v2)
 set -eu
 
 case "${PI_DOCKER_UID:-}" in ''|*[!0-9]*) echo 'Invalid PI_DOCKER_UID' >&2; exit 1 ;; esac
@@ -186,12 +187,15 @@ if ! getent passwd "$PI_DOCKER_UID" >/dev/null; then
         --home-dir /home/pi --shell /bin/bash pi-docker
 fi
 
-exec gosu "$PI_DOCKER_UID:$PI_DOCKER_GID" pi "$@"
+# gosu replaces HOME with the passwd entry's home. UID 1000 already belongs to
+# the base image's node user (/home/node), not /home/pi. Restore our private
+# HOME after dropping privileges so Pi and extensions see the mounted profile.
+exec gosu "$PI_DOCKER_UID:$PI_DOCKER_GID" env HOME=/home/pi pi "$@"
 ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v4)
+# Managed by install-pi-docker.sh (v5)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -202,6 +206,7 @@ ISOLATED_AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
 TAILNET=1
 ISOLATED=0
+DOCTOR=0
 PROJECT_DIR=''
 ENV_FILE="$CONFIG_DIR/env"
 
@@ -213,10 +218,10 @@ usage() {
     cat <<'USAGE'
 Usage: pi-docker [options] [pi args...]
        pi-docker config [list|get|set|unset] [KEY [VALUE]]
-       pi-docker doctor
+       pi-docker doctor [--isolated] [--no-tailnet]
 
 Options:
-  --tailnet          Use the host network and Tailscale DNS (default).
+  --tailnet          Use the host network and host DNS resolver (default).
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
   --isolated         Use the separate profile at ~/.local/share/pi-docker/agent
@@ -414,7 +419,8 @@ launcher_version() {
 }
 
 doctor() {
-    local url key line label have_docker doctor_agent_dir doctor_dirs
+    local url key line label have_docker have_image=0 doctor_agent_dir
+    local -a doctor_dirs
     printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
 
     if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
@@ -427,16 +433,17 @@ doctor() {
 
     if (( have_docker )); then
         if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+            have_image=1
             label=$(docker image inspect --format '{{ index .Config.Labels "io.pi-docker.installer" }}' "$IMAGE" 2>/dev/null || true)
             if [[ -n $label ]]; then
                 doc_ok "Image $IMAGE present (managed, installer version $label)"
             else
                 doc_bad "Image $IMAGE exists but is not managed by install-pi-docker.sh"
             fi
-            if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg' >/dev/null 2>&1; then
-                doc_ok 'Image sandbox dependencies present (bwrap, socat, rg)'
+            if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg && command -v fd' >/dev/null 2>&1; then
+                doc_ok 'Image dependencies present (bwrap, socat, rg, fd)'
             else
-                doc_bad 'Image sandbox dependencies missing (rerun: ./install-pi-docker.sh --rebuild)'
+                doc_bad 'Image dependencies missing (rerun: ./install-pi-docker.sh)'
             fi
         else
             doc_bad "Image $IMAGE missing (run ./install-pi-docker.sh)"
@@ -445,7 +452,7 @@ doctor() {
 
     doc_ok "Launcher version: $(launcher_version)"
 
-    if ((DOCTOR_ISOLATED)); then
+    if ((ISOLATED)); then
         doctor_agent_dir="$ISOLATED_AGENT_DIR"
     else
         doctor_agent_dir="$PI_DIR/agent"
@@ -458,10 +465,14 @@ doctor() {
         fi
     done
 
-    doctor_dirs=("$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR")
-    if ((DOCTOR_ISOLATED)); then
-        doctor_dirs+=("$ISOLATED_AGENT_DIR")
+    doc_note "Selected profile: $doctor_agent_dir"
+    if [[ -s $doctor_agent_dir/auth.json ]]; then
+        doc_ok 'Profile auth.json exists (credentials are not displayed)'
+    else
+        doc_note 'No stored credentials in this profile; use host Pi /login or configure an API key/model'
     fi
+
+    doctor_dirs=("$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$doctor_agent_dir")
     for line in "${doctor_dirs[@]}"; do
         if [[ -d $line ]]; then
             doc_ok "Directory: $line"
@@ -502,14 +513,30 @@ doctor() {
         doc_note 'curl not found; skipping URL reachability checks'
     fi
 
-    if command -v timeout >/dev/null; then
-        if timeout 2 bash -c 'exec 3<>/dev/tcp/100.100.100.100/53' 2>/dev/null; then
-            doc_ok 'Tailscale DNS (100.100.100.100:53) reachable'
+    # Probe from the selected container network, not just the host. A TCP
+    # connection to a DNS server does not prove name resolution or HTTPS works.
+    if ((have_image)); then
+        if docker "${args[@]}" --entrypoint sh "$IMAGE" -c '
+            exec gosu "$PI_DOCKER_UID:$PI_DOCKER_GID" env HOME=/home/pi sh -c '\''
+                agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+                test -d "$agent_dir" && test -r "$agent_dir" && test -w "$agent_dir" &&
+                { test ! -e "$agent_dir/auth.json" || test -r "$agent_dir/auth.json"; }
+            '\''
+        '; then
+            doc_ok 'Container profile accessible as the host UID'
         else
-            doc_bad 'Tailscale DNS unreachable (is tailscaled running? use --no-tailnet to fall back)'
+            doc_bad 'Container profile inaccessible (check mounts and file ownership)'
         fi
+        for url in https://github.com https://auth.openai.com; do
+            if docker "${args[@]}" --entrypoint curl "$IMAGE" \
+                --silent --show-error --output /dev/null --connect-timeout 3 --max-time 10 "$url"; then
+                doc_ok "Container DNS/HTTPS reachable: $url"
+            else
+                doc_bad "Container DNS/HTTPS failed: $url (check the host resolver, or try --no-tailnet)"
+            fi
+        done
     else
-        doc_note 'timeout not found; skipping Tailscale DNS probe'
+        doc_note 'Skipping container profile/network checks: image unavailable'
     fi
 
     if [[ :$PATH: == *":$HOME/.local/bin:"* ]]; then
@@ -525,21 +552,9 @@ doctor() {
     return 0
 }
 
-DOCTOR_ISOLATED=0
 case ${1:-} in
     config) shift; run_config "$@" ;;
-    doctor)
-        shift
-        while (($#)); do
-            case $1 in
-                --isolated) DOCTOR_ISOLATED=1 ;;
-                -h|--help) usage; exit 0 ;;
-                *) die "Unknown doctor option: $1 (expected --isolated)" ;;
-            esac
-            shift
-        done
-        doctor || exit 1; exit 0
-        ;;
+    doctor) DOCTOR=1; shift ;;
 esac
 
 while (($#)); do
@@ -553,7 +568,10 @@ while (($#)); do
             shift
             ;;
         -h|--help) usage; exit 0 ;;
-        *) break ;;
+        *)
+            ((DOCTOR == 0)) || die "Unknown doctor option: $1"
+            break
+            ;;
     esac
     shift
 done
@@ -564,14 +582,17 @@ if [[ -n $PROJECT_DIR ]]; then
     workdir_src=$(cd -- "$PROJECT_DIR" && pwd -P) || die "Cannot resolve project directory: $PROJECT_DIR"
 fi
 
-if ((ISOLATED)); then
-    mkdir -p "$CONFIG_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
-    chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
-else
-    mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
-    chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
+# doctor is read-only: report missing directories instead of creating them.
+if ((DOCTOR == 0)); then
+    if ((ISOLATED)); then
+        mkdir -p "$CONFIG_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
+        chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$ISOLATED_AGENT_DIR" "$SANDBOX_HOME"
+    else
+        mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR/agent"
+        chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
+    fi
+    migrate_legacy_url_files
 fi
-migrate_legacy_url_files
 
 args=(run --rm --init --pids-limit=512
     --mount "type=bind,source=$workdir_src,target=/workspace"
@@ -594,12 +615,18 @@ if ((ISOLATED)); then
            --env PI_CODING_AGENT_DIR=/pi-agent)
 else
     # Child mount comes after the parent so /home/pi/.pi lands on top of /home/pi.
+    # Leave PI_CODING_AGENT_DIR unset: pi-ext-int-search must also be able to
+    # discover the legacy ~/.pi/web-search.json used by the host/deployer.
     args+=(--mount "type=bind,source=$PI_DIR,target=/home/pi/.pi")
 fi
 
 if ((TAILNET)); then
-    # This shares the host network namespace, including the host's local services.
-    args+=(--network=host --dns=100.100.100.100)
+    # Host networking can reach the host's loopback resolver (e.g. 127.0.0.53).
+    # Bind the host resolver config too: Docker may otherwise replace the stub
+    # with upstream servers, losing split DNS. Do not force Tailscale's Quad100;
+    # it may not resolve public domains on hosts with split-DNS configurations.
+    args+=(--network=host
+           --mount "type=bind,source=/etc/resolv.conf,target=/etc/resolv.conf,readonly")
 fi
 
 searxng_url=${SEARXNG_URL:-}
@@ -614,8 +641,10 @@ llama_key=${LLAMA_API_KEY:-}
 if [[ -z $llama_key ]]; then llama_key=$(env_get LLAMA_API_KEY); fi
 [[ -z $llama_key ]] || args+=(--env "LLAMA_API_KEY=$llama_key")
 
-[[ -t 0 ]] && args+=(--interactive)
-[[ -t 0 && -t 1 ]] && args+=(--tty)
+if ((DOCTOR == 0)); then
+    [[ -t 0 ]] && args+=(--interactive)
+    [[ -t 0 && -t 1 ]] && args+=(--tty)
+fi
 
 # Pass only explicitly selected provider keys; do not forward the whole host environment.
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY \
@@ -634,6 +663,10 @@ cpus=${PI_DOCKER_CPUS:-}
 if [[ -z $cpus ]]; then cpus=$(env_get PI_DOCKER_CPUS); fi
 [[ -z $cpus ]] || args+=(--cpus "$cpus")
 
+if ((DOCTOR)); then
+    doctor || exit 1
+    exit 0
+fi
 exec docker "${args[@]}" "$IMAGE" "$@"
 LAUNCHER_CONTENT
 
@@ -664,6 +697,21 @@ check_file() {
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
                 return
             fi
+            # Exact v4 launcher can be upgraded while preserving customized copies.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 3a1b1b4ab6087fad9e68e3cab6090e6d436f76be1cd62457bad3046c0c9de1dc ]]; then
+                return
+            fi
+            # Upgrade the exact Dockerfile shipped in image v2 automatically.
+            if [[ $destination == "$DOCKERFILE" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == f7f6f0bda1d94a92441c04818d3775a24be01a6a9b80bec0a53a2c53642f02e0 ]]; then
+                return
+            fi
+            # Upgrade the exact v1 entrypoint (fixes gosu resetting HOME).
+            if [[ $destination == "$CONFIG_DIR/entrypoint.sh" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == eaba06fe6c74a729b7c3a561582aee0ee9476ace1e4a80fb85d214e82f6c8f5c ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
             if [[ $destination == "$DOCKERFILE" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 553a25e729d82e38f7883f345d8b1b0672f15aa1aa70397a49d4b691967de8a0 ]]; then
@@ -681,7 +729,7 @@ check_file "$LAUNCHER" "$work_dir/pi-docker"
 existing_label=''
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     existing_label=$(docker image inspect --format '{{ index .Config.Labels "io.pi-docker.installer" }}' "$IMAGE")
-    if [[ $existing_label != "$IMAGE_VERSION" && $existing_label != 1 && $FORCE -ne 1 ]]; then
+    if [[ $existing_label != "$IMAGE_VERSION" && $existing_label != 1 && $existing_label != 2 && $FORCE -ne 1 ]]; then
         die "Docker image $IMAGE is not managed by this installer; use --force to replace it."
     fi
 fi
@@ -746,8 +794,8 @@ if [[ -z $existing_label || $existing_label != "$IMAGE_VERSION" || $REBUILD -eq 
     [[ -n $existing_label && $REBUILD -eq 0 ]] || build_args+=(--pull)
     [[ $REBUILD -eq 0 ]] || build_args+=(--no-cache)
     docker "${build_args[@]}" "$CONFIG_DIR"
-    docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg' \
-        || die 'Image was built but a sandbox dependency is missing.'
+    docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg && command -v fd' \
+        || die 'Image was built but a runtime dependency is missing.'
 else
     printf 'Managed Docker image already installed: %s\n' "$IMAGE"
 fi
