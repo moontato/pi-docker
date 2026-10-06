@@ -50,8 +50,16 @@ with open(os.environ['DOCKER_TEST_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['image', 'inspect'] and '--format' in args:
     print(os.environ.get('DOCKER_TEST_LABEL', '3'))
-if '--entrypoint' in args and args[args.index('--entrypoint') + 1] == 'curl':
-    sys.exit(int(os.environ.get('DOCKER_TEST_NETWORK_FAIL', '0')))
+if args and args[0] == 'build':
+    from pathlib import Path
+    context = {p.name: p.read_text() for p in Path(args[-1]).iterdir() if p.is_file()}
+    Path(os.environ['DOCKER_TEST_LOG'] + '.context').write_text(json.dumps(context))
+if '--entrypoint' in args:
+    entrypoint = args[args.index('--entrypoint') + 1]
+    if entrypoint == 'pi':
+        print(os.environ.get('DOCKER_TEST_PI_VERSION', '1.0.0'))
+    elif entrypoint == 'curl':
+        sys.exit(int(os.environ.get('DOCKER_TEST_NETWORK_FAIL', '0')))
 """)
 
     def run_script(self, script, *args, expected=0):
@@ -254,6 +262,54 @@ print(json.dumps({'home': os.environ['HOME'],
                          generated(self.source, "LAUNCHER"))
         self.assertEqual((agent / "auth.json").read_bytes(), auth_before)
         self.assertTrue(any(call[0] == "build" for call in self.calls()))
+
+    def test_installer_excludes_saved_keys_from_build_context(self):
+        self.prepare_profile()
+        config = self.home / ".config/pi-docker"
+        (config / "env").write_text("OPENAI_API_KEY=do-not-upload-this-key\n")
+        self.run_script(INSTALLER, "--rebuild", "--searxng-url", "https://search.example",
+                        "--llama-url", "http://localhost:8080")
+        build = next(call for call in self.calls() if call[0] == "build")
+        self.assertNotEqual(build[-1], str(config))
+        self.assertIn("--no-cache", build)
+        self.assertIn("--pull", build)
+        context = json.loads(Path(str(self.log) + ".context").read_text())
+        self.assertEqual(set(context), {"Dockerfile", "entrypoint.sh", "pi-docker"})
+        self.assertNotIn("do-not-upload-this-key", json.dumps(context))
+
+    def test_exact_main_and_feature_launchers_upgrade_without_force(self):
+        self.prepare_profile()
+        launcher = self.home / ".local/bin/pi-docker"
+        for rev in ("0504639", "f0cf6e7"):
+            with self.subTest(snapshot=rev):
+                old = subprocess.run(["git", "show", rev + ":install-pi-docker.sh"],
+                                     cwd=ROOT, text=True, capture_output=True)
+                if old.returncode:
+                    self.skipTest("upgrade snapshot unavailable in this checkout")
+                executable(launcher, generated(old.stdout, "LAUNCHER"))
+                self.run_script(INSTALLER, "--searxng-url", "https://search.example",
+                                "--llama-url", "http://localhost:8080")
+                self.assertEqual(launcher.read_text(), generated(self.source, "LAUNCHER"))
+
+    def test_doctor_reports_pi_version_mismatch(self):
+        self.prepare_profile()
+        executable(self.bin / "pi", "#!/bin/sh\nprintf '1.2.0\\n'\n")
+        self.env["DOCKER_TEST_PI_VERSION"] = "0.87.1"
+        result = self.launch("doctor")
+        self.assertIn("Pi version mismatch: host 1.2.0, container 0.87.1", result.stdout)
+        self.assertIn("--rebuild updates container Pi", result.stdout)
+
+    def test_config_rejects_multiline_values_without_changing_saved_keys(self):
+        self.launch("config", "set", "OPENAI_API_KEY", "keep-this-key")
+        for value in ("new-key\nPI_DOCKER_DNS=1.1.1.1", "new-key\rhidden-value"):
+            with self.subTest(value=value):
+                result = self.launch("config", "set", "OPENAI_API_KEY", value, expected=1)
+                self.assertIn("must be a single line", result.stderr)
+        self.assertEqual(self.launch("config", "get", "OPENAI_API_KEY").stdout.strip(),
+                         "keep-this-key")
+        listing = self.launch("config", "list").stdout
+        self.assertIn("OPENAI_API_KEY=***", listing)
+        self.assertNotIn("keep-this-key", listing)
 
     def test_installer_does_not_overwrite_custom_entrypoint(self):
         config = self.home / ".config/pi-docker"

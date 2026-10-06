@@ -21,7 +21,7 @@ Usage: ./setup-pi-config.sh [--target host|docker|both] [--yes] [--install-packa
   --check            Report drift without changing anything (exit 1 if drift).
   --restore          Restore target files from their .bak backups.
   --yes              Apply the previewed changes and make .bak backups without prompting.
-  --install-packages Install missing Pi packages in the docker profile after syncing.
+  --install-packages Install missing Pi packages in the shared profile after syncing.
 
 Run from the extracted pi_configs directory. Files already in place are untouched.
 USAGE

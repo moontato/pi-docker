@@ -38,9 +38,11 @@ The current directory is writable inside Pi as `/workspace`, or pass `pi-docker 
 
 By default pi-docker mounts your host `~/.pi` into the container, so host Pi and pi-docker are one profile: `/login` on either side (for example OpenAI Codex) updates the same `auth.json`, and settings, models, sessions, extensions, and packages are shared. The container's `HOME` itself stays private. Pass `--isolated` to use the old separate profile at `~/.local/share/pi-docker/agent` instead.
 
+The shared profile is writable trusted state: container changes to credentials, packages, or extensions also affect host Pi. Use `--isolated` if you do not want that connection. The container also has writable access to the selected project and can reach host-local services in host-network mode; Docker is not a guarantee against changes to those explicitly shared resources.
+
 ## Manage settings
 
-Service URLs, API keys, and resource limits live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
+Service URLs, API keys, resource limits, and optional host-network DNS live in `~/.config/pi-docker/env` (mode 600). Manage them without rerunning the installer:
 
 ```bash
 pi-docker config list                 # show saved settings (API keys masked)
@@ -50,15 +52,40 @@ pi-docker config get SEARXNG_URL
 pi-docker config unset GROQ_API_KEY
 ```
 
-Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `PI_DOCKER_MEMORY`, `PI_DOCKER_CPUS`, `PI_DOCKER_DNS`, and the provider keys). The installer's URL flags and the values derived from `pi_configs/` write to the same file; the old `searxng-url`/`llama-url` files are migrated into it automatically.
+
+### DNS and OpenAI subscription login
+
+Host networking is enabled by default (`--tailnet`). Without an override it uses the host's `/etc/resolv.conf` read-only, preserving the host's public and Tailscale split DNS. If OpenAI login reports `fetch failed` / `EAI_AGAIN`, run `pi-docker doctor`. You can override the resolver without rebuilding the image:
+
+```bash
+# Only if this host has a working systemd-resolved stub:
+pi-docker config set PI_DOCKER_DNS 127.0.0.53
+pi-docker
+# Inside Pi: /login, then select ChatGPT/Codex.
+```
+
+`PI_DOCKER_DNS` accepts one canonical dotted-quad IPv4 address. The shell environment takes precedence over the saved value; otherwise the host resolver remains. IPv6, hostnames, and multiple servers are not currently accepted. Choose a resolver that handles both public authentication endpoints and your private services: public DNS servers may not resolve tailnet names.
+
+A loopback resolver such as `127.0.0.53` works only when the host actually runs it and the container uses **host networking**. `--no-tailnet` ignores this setting and retains Docker's bridge networking/DNS. Bridge mode may resolve public endpoints while losing private tailnet names, and OAuth browser callbacks may require pasting the redirect URL into Pi when prompted.
+
+Restart the container after changing DNS. This does not modify host DNS, credentials, clipboard access, images, or sandbox policies. It changes which resolver's routing/privacy policy you use within the existing host-network boundary. Login still requires your approval; successful credentials persist in the selected mounted Pi profile (shared with host Pi by default). Do not commit them or share authorization codes.
+
+To restore the host resolver, run `pi-docker config unset PI_DOCKER_DNS`, unset any shell `PI_DOCKER_DNS` override, and restart.
+
+### Copy text from the TUI
+
+Hold **Shift before starting a mouse drag** to use your terminal's native selection, then use its Copy command (often Ctrl+Shift+C on Linux/Windows or Cmd+C on macOS). Pressing Ctrl+Shift+C while Pi owns the highlight may not copy anything. Most terminals support this mouse override, though the exact modifier can vary.
+
+Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not that the terminal accepted it. Terminal/SSH/multiplexer support determines whether that request reaches your clipboard. Native terminal selection avoids needing desktop clipboard sockets or broader container permissions.
 
 ## Check health
 
-`pi-docker doctor` checks Docker, image dependencies (including `fd`), packages, the selected profile's accessibility as your UID, saved settings, service URLs, DNS/HTTPS to GitHub and OpenAI **from the container**, and PATH. It exits nonzero when a check fails and never displays stored credentials. Use `pi-docker doctor --no-tailnet` or `pi-docker doctor --isolated` to check those modes.
+`pi-docker doctor` checks Docker, image dependencies (including `fd`), packages, the selected profile's accessibility as your UID, saved settings, service URLs, DNS/HTTPS to GitHub and OpenAI **from the container**, and PATH. It also reports container Pi's version and notes mismatches with host Pi. It exits nonzero when a check fails, masks saved API keys, and does not display `auth.json` contents. Use `pi-docker doctor --no-tailnet` or `pi-docker doctor --isolated` to check those modes.
 
 ### Startup/authentication troubleshooting
 
-After updating this repository, run `./install-pi-docker.sh` again. The v5 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+After updating this repository, run `./install-pi-docker.sh` again. The v6 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
 
 The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
 
@@ -66,7 +93,9 @@ If `No models available` remains, confirm you have logged in with host Pi (`pi`,
 
 ## Later
 
-Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Use `--rebuild` only when you intentionally want a fresh image build. `pi-docker` shares the host network namespace, including host-local services, and bind-mounts the host's `/etc/resolv.conf` read-only to use its resolver (including Tailscale DNS); pass `--no-tailnet` to use Docker's normal network and DNS instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Sharing the profile does **not** synchronize Pi binaries: even an automatic image upgrade can reuse the cached npm install. Use `./install-pi-docker.sh --rebuild` to install the latest published Pi in the container, then compare `pi --version` and `pi-docker --version`. This does not pin the container to the host's exact version.
+
+`pi-docker` shares the host network namespace, including host-local services, and uses `PI_DOCKER_DNS` when configured, otherwise the host's `/etc/resolv.conf` mounted read-only; pass `--no-tailnet` to use Docker's normal network and DNS instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
 
 ## Tests
 
@@ -74,4 +103,6 @@ Run offline regression tests (no Docker daemon or network required):
 
 ```bash
 python3 -B -m unittest discover -s tests -v
+bash tests/launcher.sh
+bash tests/installer.sh
 ```

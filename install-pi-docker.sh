@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v5)
+# Managed by install-pi-docker.sh (v6)
 set -Eeuo pipefail
 umask 077
 
@@ -195,7 +195,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v5)
+# Managed by install-pi-docker.sh (v6)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -210,7 +210,7 @@ DOCTOR=0
 PROJECT_DIR=''
 ENV_FILE="$CONFIG_DIR/env"
 
-config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
+config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS PI_DOCKER_DNS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
 
 die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
 
@@ -221,7 +221,7 @@ Usage: pi-docker [options] [pi args...]
        pi-docker doctor [--isolated] [--no-tailnet]
 
 Options:
-  --tailnet          Use the host network and host DNS resolver (default).
+  --tailnet          Use host networking and host DNS unless PI_DOCKER_DNS is set.
   --no-tailnet       Use Docker's normal network instead.
   --project DIR      Bind DIR as /workspace instead of the current directory.
   --isolated         Use the separate profile at ~/.local/share/pi-docker/agent
@@ -238,6 +238,7 @@ Commands:
 
 Recognized settings (shell environment always wins over saved values):
   SEARXNG_URL, LLAMA_BASE_URL, LLAMA_API_KEY, PI_DOCKER_MEMORY, PI_DOCKER_CPUS,
+  PI_DOCKER_DNS (one IPv4 resolver, host-network mode only),
   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY,
   GROQ_API_KEY.
 
@@ -307,12 +308,34 @@ is_valid_url() {
     [[ $1 =~ ^https?://[^[:space:]]+$ ]] && [[ $1 != *'<'* && $1 != *'>'* ]]
 }
 
+# A single numeric IPv4 address avoids shell interpretation and DNS bootstrap.
+is_valid_dns() {
+    local octet
+    local -a octets
+    [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [[ $octet == 0 || $octet != 0* ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+host_network_dns() {
+    local dns=${PI_DOCKER_DNS:-}
+    if [[ -z $dns ]]; then dns=$(env_get PI_DOCKER_DNS); fi
+    if [[ -n $dns ]]; then
+        is_valid_dns "$dns" || die 'PI_DOCKER_DNS must be one IPv4 address (e.g. 127.0.0.53).'
+    fi
+    printf '%s' "$dns"
+}
+
 config_set() {
     local key=$1 value=$2
     is_config_key "$key" || die "Unknown setting: $key"
     if [[ -z $value ]]; then
         die "Value for $key must not be empty."
     fi
+    [[ $value != *$'\n'* && $value != *$'\r'* ]] || die "Value for $key must be a single line."
     case $key in
         SEARXNG_URL|LLAMA_BASE_URL)
             is_valid_url "$value" || die "$key must be a URL like https://host:port, with no whitespace or angle brackets."
@@ -322,6 +345,9 @@ config_set() {
             ;;
         PI_DOCKER_CPUS)
             [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "PI_DOCKER_CPUS must be a number (e.g. 4 or 2.5)."
+            ;;
+        PI_DOCKER_DNS)
+            is_valid_dns "$value" || die 'PI_DOCKER_DNS must be one IPv4 address (e.g. 127.0.0.53).'
             ;;
     esac
     mkdir -p "$CONFIG_DIR"
@@ -420,6 +446,7 @@ launcher_version() {
 
 doctor() {
     local url key line label have_docker have_image=0 doctor_agent_dir
+    local host_version container_version
     local -a doctor_dirs
     printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
 
@@ -443,7 +470,19 @@ doctor() {
             if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg && command -v fd' >/dev/null 2>&1; then
                 doc_ok 'Image dependencies present (bwrap, socat, rg, fd)'
             else
-                doc_bad 'Image dependencies missing (rerun: ./install-pi-docker.sh)'
+                doc_bad 'Image dependencies missing (rerun: ./install-pi-docker.sh --rebuild)'
+            fi
+            container_version=$(docker run --rm --entrypoint pi "$IMAGE" --version 2>/dev/null || true)
+            if [[ -n $container_version ]]; then
+                doc_ok "Container Pi version: $container_version"
+                if command -v pi >/dev/null; then
+                    host_version=$(pi --version 2>/dev/null || true)
+                    if [[ -n $host_version && $host_version != "$container_version" ]]; then
+                        doc_note "Pi version mismatch: host $host_version, container $container_version; --rebuild updates container Pi, not the host"
+                    fi
+                fi
+            else
+                doc_bad 'Cannot determine container Pi version'
             fi
         else
             doc_bad "Image $IMAGE missing (run ./install-pi-docker.sh)"
@@ -511,6 +550,12 @@ doctor() {
         done
     else
         doc_note 'curl not found; skipping URL reachability checks'
+    fi
+
+    if ((TAILNET)); then
+        doc_note "Host-network DNS: ${dns:-host /etc/resolv.conf}"
+    else
+        doc_note 'Bridge-network DNS: Docker default (PI_DOCKER_DNS ignored)'
     fi
 
     # Probe from the selected container network, not just the host. A TCP
@@ -620,13 +665,17 @@ else
     args+=(--mount "type=bind,source=$PI_DIR,target=/home/pi/.pi")
 fi
 
+dns=''
 if ((TAILNET)); then
-    # Host networking can reach the host's loopback resolver (e.g. 127.0.0.53).
-    # Bind the host resolver config too: Docker may otherwise replace the stub
-    # with upstream servers, losing split DNS. Do not force Tailscale's Quad100;
-    # it may not resolve public domains on hosts with split-DNS configurations.
-    args+=(--network=host
-           --mount "type=bind,source=/etc/resolv.conf,target=/etc/resolv.conf,readonly")
+    # Loopback resolvers work in the shared host network namespace. Preserve
+    # split DNS by default, but honor the existing explicit DNS override.
+    dns=$(host_network_dns)
+    args+=(--network=host)
+    if [[ -n $dns ]]; then
+        args+=("--dns=$dns")
+    else
+        args+=(--mount "type=bind,source=/etc/resolv.conf,target=/etc/resolv.conf,readonly")
+    fi
 fi
 
 searxng_url=${SEARXNG_URL:-}
@@ -695,6 +744,16 @@ check_file() {
             # Exact v3 launcher can be upgraded while preserving customized copies.
             if [[ $destination == "$LAUNCHER" ]] && \
                 [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
+                return
+            fi
+            # Exact v3.1 launcher from main can be upgraded without --force.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == c142332f000547a9f4d2481a4ec99fd7a05cb14b164cb6e753fcc948f54aac69 ]]; then
+                return
+            fi
+            # Exact v5 launcher from features can be upgraded without --force.
+            if [[ $destination == "$LAUNCHER" ]] && \
+                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 29bd47c36a888ab461f29f9e0279c7e28f831eea89398bd0cc6f408ce2210f4a ]]; then
                 return
             fi
             # Exact v4 launcher can be upgraded while preserving customized copies.
@@ -793,7 +852,9 @@ if [[ -z $existing_label || $existing_label != "$IMAGE_VERSION" || $REBUILD -eq 
     # A fresh install or deliberate --rebuild checks for a newer base image.
     [[ -n $existing_label && $REBUILD -eq 0 ]] || build_args+=(--pull)
     [[ $REBUILD -eq 0 ]] || build_args+=(--no-cache)
-    docker "${build_args[@]}" "$CONFIG_DIR"
+    # Never upload saved URLs/API keys or unrelated files in CONFIG_DIR to
+    # Docker/BuildKit. The scratch context contains only generated scripts.
+    docker "${build_args[@]}" "$work_dir"
     docker run --rm --entrypoint sh "$IMAGE" -c 'command -v bwrap && command -v socat && command -v rg && command -v fd' \
         || die 'Image was built but a runtime dependency is missing.'
 else
