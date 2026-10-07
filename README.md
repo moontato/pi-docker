@@ -96,7 +96,7 @@ Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not 
 
 ### Startup/authentication troubleshooting
 
-After updating this repository, run `./install-pi-docker.sh` again. The v7 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+After updating this repository, run `./install-pi-docker.sh` again. The v7 launcher and v4 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
 
 The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
 

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 IMAGE=local/pi-docker:latest
-IMAGE_VERSION=3
+IMAGE_VERSION=4
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 NPM_DIR="$DATA_DIR/npm"
@@ -149,10 +149,10 @@ work_dir=$(mktemp -d -p "${TMPDIR:-/tmp}")
 trap 'rm -rf "$work_dir"' EXIT
 
 cat >"$work_dir/Dockerfile" <<'DOCKERFILE_CONTENT'
-# Managed by install-pi-docker.sh (v3)
+# Managed by install-pi-docker.sh (v4)
 FROM node:24-bookworm-slim
 
-LABEL io.pi-docker.installer="3"
+LABEL io.pi-docker.installer="4"
 
 # sudo and gosu let Pi run as the host UID and install OS packages on demand.
 RUN apt-get update \
@@ -182,7 +182,7 @@ DOCKERFILE_CONTENT
 
 cat >"$work_dir/entrypoint.sh" <<'ENTRYPOINT_CONTENT'
 #!/bin/sh
-# Managed by install-pi-docker.sh (v2)
+# Managed by install-pi-docker.sh (v3)
 set -eu
 
 case "${PI_DOCKER_UID:-}" in ''|*[!0-9]*) echo 'Invalid PI_DOCKER_UID' >&2; exit 1 ;; esac
@@ -192,8 +192,19 @@ if ! getent group "$PI_DOCKER_GID" >/dev/null; then
     groupadd --gid "$PI_DOCKER_GID" pi-docker
 fi
 if ! getent passwd "$PI_DOCKER_UID" >/dev/null; then
-    useradd --no-create-home --uid "$PI_DOCKER_UID" --gid "$PI_DOCKER_GID" \
-        --home-dir /home/pi --shell /bin/bash pi-docker
+    # Debian's useradd prints a harmless range warning for host UIDs outside
+    # /etc/login.defs - always the case on macOS, where the first user is 501.
+    # Capture output and status, drop only that warning, keep everything else
+    # (real errors, exit code) intact.
+    ua_rc=0
+    ua_out=$(useradd --no-create-home --uid "$PI_DOCKER_UID" --gid "$PI_DOCKER_GID" \
+        --home-dir /home/pi --shell /bin/bash pi-docker 2>&1) || ua_rc=$?
+    ua_out=$(printf '%s\n' "$ua_out" | grep -v '^useradd warning: .*outside of the [UG]ID_MIN .* range\.$' || true)
+    if [ "$ua_rc" -ne 0 ]; then
+        if [ -n "$ua_out" ]; then printf '%s\n' "$ua_out" >&2; fi
+        exit "$ua_rc"
+    fi
+    if [ -n "$ua_out" ]; then printf '%s\n' "$ua_out" >&2; fi
 fi
 
 # gosu replaces HOME with the passwd entry's home. UID 1000 already belongs to
@@ -842,6 +853,14 @@ check_file() {
             if [[ $destination == "$LAUNCHER" && $digest == 27ad56bde8ce3b12c4b085ab0f054ba40ddf918d2836c7c5fd9f444220bc93a7 ]]; then
                 return
             fi
+            # Upgrade the exact Dockerfile shipped in image v3 automatically.
+            if [[ $destination == "$DOCKERFILE" && $digest == a2b26fcc850ba65ec9605733153387dd4a40a644344638b7a0acc66080c1648c ]]; then
+                return
+            fi
+            # Upgrade the exact v2 entrypoint (macOS useradd range warning fix).
+            if [[ $destination == "$CONFIG_DIR/entrypoint.sh" && $digest == 402cd95012610958d510c08786707b1805b18eca4065d3c0b72a0560c42d54d6 ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v2 automatically.
             if [[ $destination == "$DOCKERFILE" && $digest == f7f6f0bda1d94a92441c04818d3775a24be01a6a9b80bec0a53a2c53642f02e0 ]]; then
                 return
@@ -866,7 +885,7 @@ check_file "$LAUNCHER" "$work_dir/pi-docker"
 existing_label=''
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     existing_label=$(docker image inspect --format '{{ index .Config.Labels "io.pi-docker.installer" }}' "$IMAGE")
-    if [[ $existing_label != "$IMAGE_VERSION" && $existing_label != 1 && $existing_label != 2 && $FORCE -ne 1 ]]; then
+    if [[ $existing_label != "$IMAGE_VERSION" && $existing_label != 1 && $existing_label != 2 && $existing_label != 3 && $FORCE -ne 1 ]]; then
         die "Docker image $IMAGE is not managed by this installer; use --force to replace it."
     fi
 fi

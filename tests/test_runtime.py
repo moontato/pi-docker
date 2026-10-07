@@ -51,7 +51,7 @@ args = sys.argv[1:]
 with open(os.environ['DOCKER_TEST_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\\n')
 if args[:2] == ['image', 'inspect'] and '--format' in args:
-    print(os.environ.get('DOCKER_TEST_LABEL', '3'))
+    print(os.environ.get('DOCKER_TEST_LABEL', '4'))
 if args and args[0] == 'build':
     from pathlib import Path
     context = {p.name: p.read_text() for p in Path(args[-1]).iterdir() if p.is_file()}
@@ -101,9 +101,14 @@ printf '%s\n' "${UNAME_OS:-Linux}"
 
     def fake_user_commands(self, existing=True):
         executable(self.bin / "getent", "#!/bin/sh\nexit " + ("0\n" if existing else "1\n"))
-        for command in ("groupadd", "useradd"):
-            executable(self.bin / command, """#!/bin/sh
+        executable(self.bin / "groupadd", """#!/bin/sh
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$DOCKER_TEST_LOG"
+""")
+        # Mimic Debian useradd: succeeds, but prints the harmless range
+        # warning (always the case on macOS, uid 501) to stderr.
+        executable(self.bin / "useradd", """#!/bin/sh
+printf '%s %s\\n' "$(basename "$0")" "$*" >> "$DOCKER_TEST_LOG"
+printf "useradd warning: pi-docker's uid 501 outside of the UID_MIN 1000 and UID_MAX 60000 range.\\n" >&2
 """)
         # Reproduce real gosu's HOME reset for the base image's existing node user.
         executable(self.bin / "gosu", """#!/bin/sh
@@ -246,6 +251,17 @@ print(json.dumps({'home': os.environ['HOME'],
         self.assertIn("groupadd --gid 23456 pi-docker", commands)
         self.assertIn("--uid 12345 --gid 23456", commands)
         self.assertIn("--home-dir /home/pi", commands)
+        # The harmless Debian range warning must not leak into stderr.
+        self.assertNotIn("useradd warning", result.stderr)
+
+    def test_useradd_failure_aborts_with_its_message(self):
+        self.fake_user_commands(existing=False)
+        # A genuinely failing useradd must still abort the entrypoint and
+        # surface its stderr (only the range warning is filtered).
+        executable(self.bin / "useradd", "#!/bin/sh\nprintf 'useradd: user pi-docker already exists\\n' >&2\nexit 9\n")
+        self.env.update(PI_DOCKER_UID="12345", PI_DOCKER_GID="23456")
+        result = self.run_script(self.entrypoint, "--version", expected=9)
+        self.assertIn("useradd: user pi-docker already exists", result.stderr)
 
     def test_invalid_uid_is_rejected(self):
         self.fake_user_commands()
@@ -257,8 +273,8 @@ print(json.dumps({'home': os.environ['HOME'],
         dockerfile = generated(self.source, "DOCKERFILE")
         self.assertIn("fd-find", dockerfile)
         self.assertIn("ln -s /usr/bin/fdfind /usr/local/bin/fd", dockerfile)
-        self.assertIn('LABEL io.pi-docker.installer="3"', dockerfile)
-        self.assertIn("IMAGE_VERSION=3", self.source)
+        self.assertIn('LABEL io.pi-docker.installer="4"', dockerfile)
+        self.assertIn("IMAGE_VERSION=4", self.source)
 
     def test_doctor_probes_selected_container_network_and_profile(self):
         agent = self.prepare_profile()

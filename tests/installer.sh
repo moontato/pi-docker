@@ -19,7 +19,7 @@ cat > "$tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_CALLS_LOG"
 if [[ ${1:-} == image && ${2:-} == inspect ]]; then
-    [[ ${3:-} != --format ]] || printf '3\n'
+    [[ ${3:-} != --format ]] || printf '4\n'
     exit 0
 fi
 case ${1:-} in info|run|build) exit 0 ;; esac
