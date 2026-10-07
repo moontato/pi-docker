@@ -2,7 +2,16 @@
 # Isolated profile and fake Docker: no daemon, network, or real config changes.
 set -Eeuo pipefail
 repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
-tmp=$(mktemp -d)
+# -p keeps macOS mktemp (which ignores $TMPDIR without a template) and GNU mktemp consistent.
+tmp=$(mktemp -d -p "${TMPDIR:-/tmp}")
+# The launcher resolves project paths with pwd -P; on macOS /tmp is a symlink.
+tmp=$(cd -- "$tmp" && pwd -P)
+
+# GNU stat -c on Linux, BSD stat -f on macOS.
+file_mode() {
+    if stat -c %a "$1" 2>/dev/null; then return 0; fi
+    stat -f %Lp "$1"
+}
 trap 'result=$?; if (( result )); then [[ ! -f "$tmp/out" ]] || tail -20 "$tmp/out" >&2; fi; rm -rf "$tmp"' EXIT
 awk '/^cat >"\$work_dir\/pi-docker" <<'"'"'LAUNCHER_CONTENT'"'"'/{p=1;next} /^LAUNCHER_CONTENT$/{p=0} p' "$repo/install-pi-docker.sh" > "$tmp/pi-docker"
 chmod +x "$tmp/pi-docker"
@@ -27,6 +36,12 @@ cat > "$tmp/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 exit 0
 MOCK
+# The launcher detects the host OS at runtime; default to Linux so the
+# original assertions hold on any host, and let sections override per-run.
+cat > "$tmp/bin/uname" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${UNAME_OS:-Linux}"
+STUB
 chmod +x "$tmp/bin/"*
 export HOME="$tmp" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data"
 export PATH="$tmp/bin:/usr/bin:/bin" DOCKER_ARGS_LOG="$tmp/args" DOCKER_CALLS_LOG="$tmp/calls"
@@ -52,7 +67,7 @@ grep -qx -- '--version' "$tmp/args"
 grep -qx 'PI_DOCKER_DNS=127.0.0.53' "$tmp/list"
 grep -qx 'OPENAI_API_KEY=\*\*\*' "$tmp/list"
 ! grep -q fixture-secret "$tmp/list"
-[[ $(stat -c %a "$tmp/config/pi-docker/env") == 600 ]]
+[[ $(file_mode "$tmp/config/pi-docker/env") == 600 ]]
 "$tmp/pi-docker"
 grep -qx -- '--dns=127.0.0.53' "$tmp/args"
 [[ $(grep -c -- '^--dns=' "$tmp/args") == 1 ]]
@@ -102,4 +117,22 @@ grep -q 'Bridge-network DNS: Docker default' "$tmp/out"
 grep -qx -- 'type=bind,source=/etc/resolv.conf,target=/etc/resolv.conf,readonly' "$tmp/args"
 "$tmp/pi-docker" --no-tailnet
 ! grep -q -e '--network=host' -e '^--dns=' "$tmp/args"
+
+# macOS: normal Docker networking by default, Desktop host networking with
+# --tailnet, and a container-local npm store in shared mode.
+UNAME_OS=Darwin "$tmp/pi-docker" --version
+! grep -q -e '--network=host' -e '^--dns=' -e 'resolv.conf' "$tmp/args"
+grep -qx -- "type=bind,source=$tmp/.pi,target=/home/pi/.pi" "$tmp/args"
+grep -qx -- "type=bind,source=$tmp/data/pi-docker/npm,target=/home/pi/.pi/agent/npm" "$tmp/args"
+UNAME_OS=Darwin "$tmp/pi-docker" --tailnet
+grep -qx -- '--network=host' "$tmp/args"
+! grep -q -e '^--dns=' -e 'resolv.conf' "$tmp/args"
+UNAME_OS=Darwin PI_DOCKER_DNS=1.1.1.1 "$tmp/pi-docker" --tailnet
+grep -qx -- '--dns=1.1.1.1' "$tmp/args"
+# Seed the container-local npm store so doctor reports packages present.
+mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search}
+UNAME_OS=Darwin "$tmp/pi-docker" doctor --tailnet > "$tmp/out"
+grep -q 'Host-network (Docker Desktop) DNS: Docker default' "$tmp/out"
+UNAME_OS=Darwin "$tmp/pi-docker" doctor > "$tmp/out"
+grep -q 'Bridge-network DNS: Docker default' "$tmp/out"
 printf 'generic launcher/DNS checks passed\n'

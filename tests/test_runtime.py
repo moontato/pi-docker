@@ -25,7 +25,9 @@ class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pi-docker-test-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Resolve to the physical path: the launcher uses pwd -P, and on
+        # macOS /tmp is a symlink to /private/tmp.
+        self.root = Path(self.temp.name).resolve()
         self.home = self.root / "home"
         self.bin = self.root / "bin"
         self.log = self.root / "docker.jsonl"
@@ -60,6 +62,11 @@ if '--entrypoint' in args:
         print(os.environ.get('DOCKER_TEST_PI_VERSION', '1.0.0'))
     elif entrypoint == 'curl':
         sys.exit(int(os.environ.get('DOCKER_TEST_NETWORK_FAIL', '0')))
+""")
+        # The launcher detects the host OS at runtime; default to Linux so the
+        # original assertions hold on any host, and let tests override.
+        executable(self.bin / "uname", r"""#!/bin/sh
+printf '%s\n' "${UNAME_OS:-Linux}"
 """)
 
     def run_script(self, script, *args, expected=0):
@@ -145,6 +152,62 @@ print(json.dumps({'home': os.environ['HOME'],
         self.assertNotIn("--network=host", args)
         self.assertFalse(any("resolv.conf" in mount for mount in self.mounts(args)))
         self.assertFalse(any(arg.startswith("PI_CODING_AGENT_DIR=") for arg in args))
+
+    def test_macos_default_uses_docker_networking_and_npm_overlay(self):
+        self.prepare_profile()
+        self.env["UNAME_OS"] = "Darwin"
+        self.launch("--version")
+        args = self.runtime_call()
+        mounts = self.mounts(args)
+        parent = f"type=bind,source={self.home}/.pi,target=/home/pi/.pi"
+        overlay = f"type=bind,source={self.home}/.local/share/pi-docker/npm,target=/home/pi/.pi/agent/npm"
+        self.assertIn(parent, mounts)
+        self.assertIn(overlay, mounts)
+        # Child mount after the parent so the overlay lands inside /home/pi/.pi.
+        self.assertLess(mounts.index(parent), mounts.index(overlay))
+        self.assertNotIn("--network=host", args)
+        self.assertFalse(any("resolv.conf" in mount for mount in mounts))
+        self.assertFalse(any(arg.startswith("--dns") for arg in args))
+
+    def test_macos_tailnet_uses_desktop_host_networking(self):
+        self.prepare_profile()
+        self.env["UNAME_OS"] = "Darwin"
+        self.env["PI_DOCKER_DNS"] = "1.1.1.1"
+        self.launch("--tailnet", "--version")
+        args = self.runtime_call()
+        self.assertIn("--network=host", args)
+        self.assertIn("--dns=1.1.1.1", args)
+        self.assertFalse(any("resolv.conf" in mount for mount in self.mounts(args)))
+
+    def test_macos_tailnet_without_dns_override_uses_docker_default_dns(self):
+        self.prepare_profile()
+        self.env["UNAME_OS"] = "Darwin"
+        self.launch("--tailnet", "--version")
+        args = self.runtime_call()
+        self.assertIn("--network=host", args)
+        self.assertFalse(any(arg.startswith("--dns") for arg in args))
+        self.assertFalse(any("resolv.conf" in mount for mount in self.mounts(args)))
+
+    def test_macos_isolated_profile_has_no_npm_overlay(self):
+        self.env["UNAME_OS"] = "Darwin"
+        self.launch("--isolated", "--version")
+        args = self.runtime_call()
+        self.assertIn(f"type=bind,source={self.home}/.local/share/pi-docker/agent,target=/pi-agent",
+                      self.mounts(args))
+        self.assertFalse(any("pi-docker/npm" in mount for mount in self.mounts(args)))
+        self.assertNotIn("--network=host", args)
+
+    def test_macos_doctor_checks_container_local_npm_store(self):
+        self.env["UNAME_OS"] = "Darwin"
+        self.prepare_profile()
+        store = self.home / ".local/share/pi-docker/npm/node_modules"
+        for package in ("pi-permission-modes", "pi-ext-int-search"):
+            (store / package).mkdir(parents=True)
+        result = self.launch("doctor")
+        self.assertIn("Package installed: pi-permission-modes", result.stdout)
+        self.assertIn("Package installed: pi-ext-int-search", result.stdout)
+        self.assertIn("Container npm store", result.stdout)
+        self.assertIn("Darwin", result.stdout)
 
     def test_project_spaces_and_pi_args_are_preserved(self):
         project = self.root / "project with spaces"
