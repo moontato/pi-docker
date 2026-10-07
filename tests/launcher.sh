@@ -70,6 +70,7 @@ grep -qx 'OPENAI_API_KEY=\*\*\*' "$tmp/list"
 [[ $(file_mode "$tmp/config/pi-docker/env") == 600 ]]
 "$tmp/pi-docker"
 grep -qx -- '--dns=127.0.0.53' "$tmp/args"
+grep -qx -- 'PI_PERMISSION_MODE=yolo' "$tmp/args"
 [[ $(grep -c -- '^--dns=' "$tmp/args") == 1 ]]
 PI_DOCKER_DNS=1.1.1.1 "$tmp/pi-docker" --tailnet
 grep -qx -- '--dns=1.1.1.1' "$tmp/args"

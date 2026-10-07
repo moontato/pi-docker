@@ -231,6 +231,13 @@ print(json.dumps({'home': os.environ['HOME'],
         self.assertNotIn("UNRELATED_SECRET=must-not-forward", args)
         self.assertNotIn("PI_CODING_AGENT_DIR=/some/host/path", args)
 
+    def test_container_defaults_to_yolo_permission_mode(self):
+        # The launcher always sets PI_PERMISSION_MODE for the container process
+        # (host Pi never sees it); --perm can still override it per run.
+        self.launch("--version")
+        args = self.runtime_call()
+        self.assertIn("PI_PERMISSION_MODE=yolo", args)
+
     def test_uid_1000_collision_restores_home_after_gosu(self):
         self.fake_user_commands()
         result = self.run_script(self.entrypoint, "-p", "hello world")

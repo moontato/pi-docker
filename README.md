@@ -47,6 +47,8 @@ pi-docker
 
 The current directory is writable inside Pi as `/workspace`, or pass `pi-docker --project DIR` to bind another directory. Use `/model` to choose a model and `/sandbox` to check permission-mode status. `pi-docker --help` lists all options. Run the config deployer again only when you change files in `pi_configs/`.
 
+pi-docker starts the container in YOLO permission mode by default: no approval prompts and no nested sandbox, because the container itself is the security boundary and Docker blocks the extension's bubblewrap sandbox anyway. The setting applies only to the container process — host Pi is unaffected. Override for a single run with `pi-docker --perm <mode>` (for example `--perm plan`).
+
 By default pi-docker mounts your host `~/.pi` into the container, so host Pi and pi-docker are one profile: `/login` on either side (for example OpenAI Codex) updates the same `auth.json`, and settings, models, sessions, extensions, and packages are shared. The container's `HOME` itself stays private. Pass `--isolated` to use the old separate profile at `~/.local/share/pi-docker/agent` instead.
 
 The shared profile is writable trusted state: container changes to credentials, packages, or extensions also affect host Pi. Use `--isolated` if you do not want that connection. The container also has writable access to the selected project and can reach host-local services in host-network mode; Docker is not a guarantee against changes to those explicitly shared resources.
@@ -96,7 +98,7 @@ Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not 
 
 ### Startup/authentication troubleshooting
 
-After updating this repository, run `./install-pi-docker.sh` again. The v7 launcher and v4 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+After updating this repository, run `./install-pi-docker.sh` again. The v8 launcher and v4 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
 
 The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
 

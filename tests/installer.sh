@@ -41,7 +41,7 @@ chmod 600 "$tmp/config/pi-docker/env"
 ! grep -q '^build ' "$tmp/calls"
 grep -q -- '--dns=127.0.0.53' "$tmp/calls"
 launcher="$tmp/.local/bin/pi-docker"
-grep -q 'Managed by install-pi-docker.sh (v7)' "$launcher"
+grep -q 'Managed by install-pi-docker.sh (v8)' "$launcher"
 [[ $("$launcher" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
 cp "$launcher" "$tmp/expected"
 "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1

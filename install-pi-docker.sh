@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v7)
+# Managed by install-pi-docker.sh (v8)
 set -Eeuo pipefail
 umask 077
 
@@ -215,7 +215,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v7)
+# Managed by install-pi-docker.sh (v8)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -796,6 +796,13 @@ cpus=${PI_DOCKER_CPUS:-}
 if [[ -z $cpus ]]; then cpus=$(env_get PI_DOCKER_CPUS); fi
 [[ -z $cpus ]] || args+=(--cpus "$cpus")
 
+# The container is the security boundary and Docker's seccomp blocks the
+# permission extension's bubblewrap sandbox, so start the container in YOLO
+# mode (no prompts, no sandbox) by default. The variable exists only in the
+# container process, so host Pi is unaffected; override per run with:
+# pi-docker --perm <mode> (the --perm flag outranks the environment variable).
+args+=(--env "PI_PERMISSION_MODE=yolo")
+
 if ((DOCTOR)); then
     doctor || exit 1
     exit 0
@@ -851,6 +858,10 @@ check_file() {
             fi
             # Exact v6 launcher (pre-macOS) can be upgraded without --force.
             if [[ $destination == "$LAUNCHER" && $digest == 27ad56bde8ce3b12c4b085ab0f054ba40ddf918d2836c7c5fd9f444220bc93a7 ]]; then
+                return
+            fi
+            # Exact v7 launcher (pre-YOLO-default) can be upgraded without --force.
+            if [[ $destination == "$LAUNCHER" && $digest == 445eeba0e5d58a7b21c06fe2eddc2323a1ac23b31d03499affcf24663b529561 ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v3 automatically.
