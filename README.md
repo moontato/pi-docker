@@ -4,7 +4,7 @@ Run Pi against one project at a time, sharing your `~/.pi` profile with host Pi 
 
 ## Set up once
 
-Requires Linux, a working Docker installation, jq, and Tailscale on the host.
+Requires Linux, or macOS with Docker Desktop, plus a working Docker installation, jq, and Tailscale on the host.
 
 First fill in your tailnet addresses in `pi_configs/` (see the note below), then:
 
@@ -26,6 +26,17 @@ cd ..
 ```
 
 The deployer shows changes and asks before copying. Its default target is `host` (your `~/.pi` profile); `--target docker` and `--target both` are aliases, since pi-docker shares `~/.pi` by default. Use `--check` for a non-interactive drift report (exit 1 if drift), and `--restore` to roll the listed destinations back from their `.bak` backups.
+
+## macOS
+
+macOS is supported through Docker Desktop; the container image stays Linux.
+
+- **Prerequisites:** Docker Desktop (started), jq, and Tailscale on the Mac. Docker Desktop 4.34+ is only needed for `--tailnet`, and requires **Settings → Resources → Network → Enable host networking**.
+- **Networking:** the macOS default is Docker Desktop's normal network and DNS (equivalent to `--no-tailnet` on Linux). Pass `--tailnet` to opt into Docker Desktop host networking. That feature is TCP/UDP-level access from the Desktop VM, not the macOS network namespace: macOS loopback-resolver tricks (for example `PI_DOCKER_DNS=127.0.0.53` with systemd-resolved) do not apply. `PI_DOCKER_DNS` is honored only in `--tailnet` mode and ignored otherwise, same as on Linux.
+- **Tailscale:** works through Docker Desktop's normal networking (VPN passthrough) while the host Tailscale is running. Tailnet IP addresses resolve directly; if MagicDNS names fail, check `pi-docker doctor` and Docker Desktop's Network/VPN settings.
+- **Local services:** services running natively on the Mac are reachable from the container as `host.docker.internal` (for example `https://host.docker.internal:8889` for a locally run SearXNG).
+- **npm packages:** on macOS, `pi-docker` overlays `~/.pi/agent/npm` with a container-local store at `~/.local/share/pi-docker/npm`. Package installs by pi-docker never touch your native macOS Pi installations, and vice versa. Credentials, settings, sessions, and user extensions remain shared.
+- **PATH (zsh):** `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`
 
 ## Open a project
 
@@ -56,10 +67,10 @@ Shell environment variables always win over saved values (`SEARXNG_URL`, `LLAMA_
 
 ### DNS and OpenAI subscription login
 
-Host networking is enabled by default (`--tailnet`). Without an override it uses the host's `/etc/resolv.conf` read-only, preserving the host's public and Tailscale split DNS. If OpenAI login reports `fetch failed` / `EAI_AGAIN`, run `pi-docker doctor`. You can override the resolver without rebuilding the image:
+Host networking is the default on Linux (`--tailnet`); on macOS the default is Docker Desktop's normal networking and `--tailnet` selects Desktop host networking. On Linux, without an override it uses the host's `/etc/resolv.conf` read-only, preserving the host's public and Tailscale split DNS. If OpenAI login reports `fetch failed` / `EAI_AGAIN`, run `pi-docker doctor`. You can override the resolver without rebuilding the image:
 
 ```bash
-# Only if this host has a working systemd-resolved stub:
+# Linux only; requires a working systemd-resolved stub:
 pi-docker config set PI_DOCKER_DNS 127.0.0.53
 pi-docker
 # Inside Pi: /login, then select ChatGPT/Codex.
@@ -81,11 +92,11 @@ Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not 
 
 ## Check health
 
-`pi-docker doctor` checks Docker, image dependencies (including `fd`), packages, the selected profile's accessibility as your UID, saved settings, service URLs, DNS/HTTPS to GitHub and OpenAI **from the container**, and PATH. It also reports container Pi's version and notes mismatches with host Pi. It exits nonzero when a check fails, masks saved API keys, and does not display `auth.json` contents. Use `pi-docker doctor --no-tailnet` or `pi-docker doctor --isolated` to check those modes.
+`pi-docker doctor` checks Docker, image dependencies (including `fd`), packages, the selected profile's accessibility as your UID, saved settings, and DNS/HTTPS to GitHub, OpenAI, and the configured service URLs **from the container**, plus PATH. It also reports container Pi's version and notes mismatches with host Pi. It exits nonzero when a check fails, masks saved API keys, and does not display `auth.json` contents. Use `pi-docker doctor --no-tailnet` or `pi-docker doctor --isolated` to check those modes.
 
 ### Startup/authentication troubleshooting
 
-After updating this repository, run `./install-pi-docker.sh` again. The v6 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+After updating this repository, run `./install-pi-docker.sh` again. The v7 launcher and v3 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
 
 The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
 
@@ -95,11 +106,11 @@ If `No models available` remains, confirm you have logged in with host Pi (`pi`,
 
 Run `./install-pi-docker.sh` again to apply installer changes; it re-reads the service URLs from `pi_configs/` and skips an image it already manages. Sharing the profile does **not** synchronize Pi binaries: even an automatic image upgrade can reuse the cached npm install. Use `./install-pi-docker.sh --rebuild` to install the latest published Pi in the container, then compare `pi --version` and `pi-docker --version`. This does not pin the container to the host's exact version.
 
-`pi-docker` shares the host network namespace, including host-local services, and uses `PI_DOCKER_DNS` when configured, otherwise the host's `/etc/resolv.conf` mounted read-only; pass `--no-tailnet` to use Docker's normal network and DNS instead. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
+On Linux, `pi-docker` shares the host network namespace, including host-local services, and uses `PI_DOCKER_DNS` when configured, otherwise the host's `/etc/resolv.conf` mounted read-only; pass `--no-tailnet` to use Docker's normal network and DNS instead. On macOS it uses Docker Desktop's normal networking by default (see the macOS section), and `--tailnet` selects Desktop host networking without mounting any macOS resolver file. The permission extension's nested Bubblewrap sandbox may be blocked by Docker even when its dependencies are installed; the outer Docker boundary still applies.
 
 ## Tests
 
-Run offline regression tests (no Docker daemon or network required):
+Run offline regression tests (no Docker daemon or network required; they pass on Linux and macOS, including stock macOS Bash 3.2):
 
 ```bash
 python3 -B -m unittest discover -s tests -v

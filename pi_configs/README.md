@@ -6,7 +6,7 @@ Keep the JSON and extension files in this folder as the canonical copies. The de
 ./setup-pi-config.sh --target host --install-packages
 ```
 
-That command syncs this folder into the shared `~/.pi` profile and installs missing `pi-permission-modes` and `pi-ext-int-search` packages. The `install-pi-docker.sh` installer also installs those packages, so `--install-packages` is most useful when restoring the configuration on another computer. No Docker image rebuild is needed for configuration changes.
+That command syncs this folder into the shared `~/.pi` profile and installs missing `pi-permission-modes` and `pi-ext-int-search` packages. The `install-pi-docker.sh` installer also installs those packages, so `--install-packages` is most useful when restoring the configuration on another computer. No Docker image rebuild is needed for configuration changes. On macOS, `--install-packages` checks the container-local store at `~/.local/share/pi-docker/npm` (the directory `pi-docker` overlays onto the shared profile), not the host's `~/.pi/agent/npm`.
 
 Run without flags (default `--target host`) to sync the shared profile; `--target docker` and `--target both` are aliases, since pi-docker now shares `~/.pi` by default. Add `--yes` to apply the previewed changes and make `.bak` backups without prompting. `--check` reports drift without applying anything (exit 1 if drift), and `--restore` rolls the selected target back from its `.bak` backups.
 
