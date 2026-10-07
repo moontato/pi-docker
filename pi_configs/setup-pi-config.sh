@@ -142,16 +142,22 @@ done
 
 if ((INSTALL_PACKAGES)); then
     command -v pi-docker >/dev/null || die 'pi-docker is not on PATH; install it before syncing packages.'
+    # macOS pi-docker overlays the shared profile's npm directory with a
+    # container-local store, so check the store pi-docker actually mounts.
+    case $(uname -s) in
+        Darwin) pkg_root="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker/npm/node_modules" ;;
+        *) pkg_root="$HOME/.pi/agent/npm/node_modules" ;;
+    esac
     for package in pi-permission-modes pi-ext-int-search; do
-        if [[ -d $HOME/.pi/agent/npm/node_modules/$package ]]; then
+        if [[ -d $pkg_root/$package ]]; then
             printf '[INSTALLED] %s\n' "$package"
         else
             printf '[INSTALLING] %s\n' "$package"
             ( cd "$SCRIPT_DIR" && pi-docker install "npm:$package" ) || die "Failed to install $package. Rerun with --install-packages to retry."
-            if [[ ! -d $HOME/.pi/agent/npm/node_modules/$package ]]; then
+            if [[ ! -d $pkg_root/$package ]]; then
                 ( cd "$SCRIPT_DIR" && pi-docker update "npm:$package" ) || die "Failed to reconcile $package. Rerun with --install-packages to retry."
             fi
-            [[ -d $HOME/.pi/agent/npm/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
+            [[ -d $pkg_root/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
         fi
     done
 fi

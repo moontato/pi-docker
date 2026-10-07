@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v6)
+# Managed by install-pi-docker.sh (v7)
 set -Eeuo pipefail
 umask 077
 
@@ -7,6 +7,7 @@ IMAGE=local/pi-docker:latest
 IMAGE_VERSION=3
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-docker"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
+NPM_DIR="$DATA_DIR/npm"
 PI_DIR="$HOME/.pi"
 BIN_DIR="$HOME/.local/bin"
 LAUNCHER="$BIN_DIR/pi-docker"
@@ -32,10 +33,12 @@ Usage: ./install-pi-docker.sh [--rebuild] [--force] [--searxng-url URL] [--llama
 URLs, keys, and resource limits are stored in ~/.config/pi-docker/env
 (manage them with: pi-docker config; see pi-docker --help).
 
-Requires a working Docker daemon; does not install Docker.
+Requires a working Docker daemon (Docker Desktop on macOS); does not install Docker.
 jq is required to derive the URLs from pi_configs/ when the flags are omitted.
-pi-docker uses the host network and resolver (including Tailscale DNS) by default;
-pass --no-tailnet to use Docker's normal network.
+On Linux, pi-docker uses the host network and resolver (including Tailscale DNS)
+by default; pass --no-tailnet to use Docker's normal network.
+On macOS, pi-docker uses Docker Desktop's normal network by default; pass
+--tailnet to use Docker Desktop host networking (Docker Desktop 4.34+).
 pi-docker shares your ~/.pi profile with host Pi by default (logins, settings,
 sessions, packages); pass --isolated to pi-docker for the old separate profile.
 Installs pi-permission-modes and pi-ext-int-search into the shared Pi profile.
@@ -70,7 +73,9 @@ env_file_get() {
 
 env_file_set() {
     local key=$1 value=$2 line tmp
-    tmp=$(mktemp)
+    # -p keeps macOS mktemp (which ignores $TMPDIR without a template) and
+    # GNU mktemp in the same, predictable temp directory.
+    tmp=$(mktemp -p "${TMPDIR:-/tmp}")
     if [[ -f $ENV_FILE ]]; then
         while IFS= read -r line || [[ -n $line ]]; do
             if [[ $line != "$key="* ]]; then
@@ -131,12 +136,16 @@ if ((SET_LLAMA)); then
     [[ $LLAMA_URL_ARG != *'<'* && $LLAMA_URL_ARG != *'>'* ]] || die 'Replace the placeholder with your actual llama-server address.'
 fi
 
-[[ $(uname -s) == Linux ]] || die 'Linux is required.'
+HOST_OS=$(uname -s)
+case $HOST_OS in
+    Linux|Darwin) ;;
+    *) die "Unsupported host OS: $HOST_OS (Linux or macOS is required)." ;;
+esac
 command -v docker >/dev/null || die 'Docker is not installed or is not on PATH.'
 docker info >/dev/null 2>&1 || die 'Cannot access the Docker daemon as this user.'
 [[ -d $HOME ]] || die 'HOME must be a real directory.'
 
-work_dir=$(mktemp -d)
+work_dir=$(mktemp -d -p "${TMPDIR:-/tmp}")
 trap 'rm -rf "$work_dir"' EXIT
 
 cat >"$work_dir/Dockerfile" <<'DOCKERFILE_CONTENT'
@@ -195,7 +204,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v6)
+# Managed by install-pi-docker.sh (v7)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -204,15 +213,26 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker"
 PI_DIR="$HOME/.pi"
 ISOLATED_AGENT_DIR="$DATA_DIR/agent"
 SANDBOX_HOME="$DATA_DIR/home"
-TAILNET=1
+NPM_DIR="$DATA_DIR/npm"
+# Tailnet/host networking is the Linux default; macOS defaults to Docker
+# Desktop's normal networking (override with --tailnet / --no-tailnet).
+TAILNET=0
 ISOLATED=0
 DOCTOR=0
 PROJECT_DIR=''
 ENV_FILE="$CONFIG_DIR/env"
 
+HOST_OS=$(uname -s)
+
 config_keys="SEARXNG_URL LLAMA_BASE_URL LLAMA_API_KEY PI_DOCKER_MEMORY PI_DOCKER_CPUS PI_DOCKER_DNS ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY"
 
 die() { printf 'pi-docker: %s\n' "$*" >&2; exit 1; }
+
+case $HOST_OS in
+    Linux) TAILNET=1 ;;
+    Darwin) ;;
+    *) die "Unsupported host OS: $HOST_OS (Linux or macOS is required)." ;;
+esac
 
 usage() {
     cat <<'USAGE'
@@ -221,8 +241,10 @@ Usage: pi-docker [options] [pi args...]
        pi-docker doctor [--isolated] [--no-tailnet]
 
 Options:
-  --tailnet          Use host networking and host DNS unless PI_DOCKER_DNS is set.
-  --no-tailnet       Use Docker's normal network instead.
+  --tailnet          Linux: host networking and host DNS unless PI_DOCKER_DNS
+                     is set. macOS: Docker Desktop host networking (Docker
+                     Desktop 4.34+; not the macOS default).
+  --no-tailnet       Use Docker's normal network instead (the macOS default).
   --project DIR      Bind DIR as /workspace instead of the current directory.
   --isolated         Use the separate profile at ~/.local/share/pi-docker/agent
                      instead of sharing ~/.pi with host Pi.
@@ -262,7 +284,9 @@ env_get() {
 
 env_set() {
     local key=$1 value=$2 line tmp
-    tmp=$(mktemp)
+    # -p keeps macOS mktemp (which ignores $TMPDIR without a template) and
+    # GNU mktemp in the same, predictable temp directory.
+    tmp=$(mktemp -p "${TMPDIR:-/tmp}")
     if [[ -f $ENV_FILE ]]; then
         while IFS= read -r line || [[ -n $line ]]; do
             if [[ $line != "$key="* ]]; then
@@ -277,7 +301,7 @@ env_set() {
 
 env_unset() {
     local key=$1 line tmp found=0
-    tmp=$(mktemp)
+    tmp=$(mktemp -p "${TMPDIR:-/tmp}")
     if [[ -f $ENV_FILE ]]; then
         while IFS= read -r line || [[ -n $line ]]; do
             if [[ $line == "$key="* ]]; then
@@ -445,10 +469,10 @@ launcher_version() {
 }
 
 doctor() {
-    local url key line label have_docker have_image=0 doctor_agent_dir
+    local url key line label have_docker have_image=0 doctor_agent_dir doctor_pkg_root
     local host_version container_version
-    local -a doctor_dirs
-    printf 'pi-docker doctor (launcher %s)\n\n' "$(launcher_version)"
+    local -a doctor_dirs probe_urls
+    printf 'pi-docker doctor (launcher %s, %s)\n\n' "$(launcher_version)" "$HOST_OS"
 
     if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
         doc_ok 'Docker daemon reachable'
@@ -493,11 +517,16 @@ doctor() {
 
     if ((ISOLATED)); then
         doctor_agent_dir="$ISOLATED_AGENT_DIR"
+        doctor_pkg_root="$ISOLATED_AGENT_DIR/npm"
     else
         doctor_agent_dir="$PI_DIR/agent"
+        case $HOST_OS in
+            Darwin) doctor_pkg_root="$NPM_DIR" ;;
+            *) doctor_pkg_root="$PI_DIR/agent/npm" ;;
+        esac
     fi
     for key in pi-permission-modes pi-ext-int-search; do
-        if [[ -d $doctor_agent_dir/npm/node_modules/$key ]]; then
+        if [[ -d $doctor_pkg_root/node_modules/$key ]]; then
             doc_ok "Package installed: $key"
         else
             doc_bad "Package missing: $key (rerun the installer, or: pi-docker install npm:$key)"
@@ -505,6 +534,9 @@ doctor() {
     done
 
     doc_note "Selected profile: $doctor_agent_dir"
+    if [[ $HOST_OS == Darwin ]] && ((ISOLATED == 0)); then
+        doc_note "Container npm store: $NPM_DIR (host ~/.pi/agent/npm stays host-only)"
+    fi
     if [[ -s $doctor_agent_dir/auth.json ]]; then
         doc_ok 'Profile auth.json exists (credentials are not displayed)'
     else
@@ -536,7 +568,11 @@ doctor() {
     if command -v curl >/dev/null; then
         for key in SEARXNG_URL LLAMA_BASE_URL; do
             url=''
-            if [[ -v $key ]]; then url=${!key}; fi
+            # ${VAR:-} (not [[ -v $key ]]): macOS ships Bash 3.2, which has no -v.
+            case $key in
+                SEARXNG_URL) url=${SEARXNG_URL:-} ;;
+                LLAMA_BASE_URL) url=${LLAMA_BASE_URL:-} ;;
+            esac
             if [[ -z $url ]]; then url=$(env_get "$key"); fi
             if [[ -n $url ]]; then
                 if curl -s -o /dev/null --max-time 3 "$url"; then
@@ -553,7 +589,11 @@ doctor() {
     fi
 
     if ((TAILNET)); then
-        doc_note "Host-network DNS: ${dns:-host /etc/resolv.conf}"
+        if [[ $HOST_OS == Darwin ]]; then
+            doc_note "Host-network (Docker Desktop) DNS: ${dns:-Docker default}"
+        else
+            doc_note "Host-network DNS: ${dns:-host /etc/resolv.conf}"
+        fi
     else
         doc_note 'Bridge-network DNS: Docker default (PI_DOCKER_DNS ignored)'
     fi
@@ -572,12 +612,25 @@ doctor() {
         else
             doc_bad 'Container profile inaccessible (check mounts and file ownership)'
         fi
-        for url in https://github.com https://auth.openai.com; do
+        # Probe the configured service URLs from the selected container
+        # network as well, not only the public endpoints.
+        probe_urls=(https://github.com https://auth.openai.com)
+        for key in SEARXNG_URL LLAMA_BASE_URL; do
+            url=''
+            case $key in
+                SEARXNG_URL) url=${SEARXNG_URL:-} ;;
+                LLAMA_BASE_URL) url=${LLAMA_BASE_URL:-} ;;
+            esac
+            if [[ -z $url ]]; then url=$(env_get "$key"); fi
+            [[ -n $url ]] || continue
+            probe_urls+=("$url")
+        done
+        for url in "${probe_urls[@]}"; do
             if docker "${args[@]}" --entrypoint curl "$IMAGE" \
                 --silent --show-error --output /dev/null --connect-timeout 3 --max-time 10 "$url"; then
                 doc_ok "Container DNS/HTTPS reachable: $url"
             else
-                doc_bad "Container DNS/HTTPS failed: $url (check the host resolver, or try --no-tailnet)"
+                doc_bad "Container DNS/HTTPS failed: $url (check the resolver, or try --no-tailnet)"
             fi
         done
     else
@@ -635,6 +688,10 @@ if ((DOCTOR == 0)); then
     else
         mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR/agent"
         chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$SANDBOX_HOME" "$PI_DIR"
+        if [[ $HOST_OS == Darwin ]]; then
+            mkdir -p "$NPM_DIR"
+            chmod 700 "$NPM_DIR"
+        fi
     fi
     migrate_legacy_url_files
 fi
@@ -663,6 +720,12 @@ else
     # Leave PI_CODING_AGENT_DIR unset: pi-ext-int-search must also be able to
     # discover the legacy ~/.pi/web-search.json used by the host/deployer.
     args+=(--mount "type=bind,source=$PI_DIR,target=/home/pi/.pi")
+    # On macOS the container gets a private npm store overlaid on the shared
+    # profile, so package installs inside the Linux container never touch the
+    # host's ~/.pi/agent/npm (managed by native macOS Pi).
+    if [[ $HOST_OS == Darwin ]]; then
+        args+=(--mount "type=bind,source=$NPM_DIR,target=/home/pi/.pi/agent/npm")
+    fi
 fi
 
 dns=''
@@ -673,7 +736,10 @@ if ((TAILNET)); then
     args+=(--network=host)
     if [[ -n $dns ]]; then
         args+=("--dns=$dns")
-    else
+    elif [[ $HOST_OS == Linux ]]; then
+        # Only mount the host resolver where the container truly shares the
+        # host network namespace (Linux). Docker Desktop host networking runs
+        # in the Desktop VM with its own resolver; --dns is the override there.
         args+=(--mount "type=bind,source=/etc/resolv.conf,target=/etc/resolv.conf,readonly")
     fi
 fi
@@ -696,10 +762,17 @@ if ((DOCTOR == 0)); then
 fi
 
 # Pass only explicitly selected provider keys; do not forward the whole host environment.
+# ${VAR:-} (not [[ -v $key ]]): macOS ships Bash 3.2, which has no -v.
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY \
     GOOGLE_GENERATIVE_AI_API_KEY GROQ_API_KEY; do
     value=''
-    if [[ -v $key ]]; then value=${!key}; fi
+    case $key in
+        ANTHROPIC_API_KEY) value=${ANTHROPIC_API_KEY:-} ;;
+        OPENAI_API_KEY) value=${OPENAI_API_KEY:-} ;;
+        GEMINI_API_KEY) value=${GEMINI_API_KEY:-} ;;
+        GOOGLE_GENERATIVE_AI_API_KEY) value=${GOOGLE_GENERATIVE_AI_API_KEY:-} ;;
+        GROQ_API_KEY) value=${GROQ_API_KEY:-} ;;
+    esac
     if [[ -z $value ]]; then value=$(env_get "$key"); fi
     if [[ -n $value ]]; then args+=(--env "$key=$value"); fi
 done
@@ -719,61 +792,66 @@ fi
 exec docker "${args[@]}" "$IMAGE" "$@"
 LAUNCHER_CONTENT
 
+# GNU sha256sum and BSD shasum both print the hex digest in field 1.
+sha256_of() {
+    local file=$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | cut -d' ' -f1
+    else
+        shasum -a 256 "$file" | cut -d' ' -f1
+    fi
+}
+
 check_file() {
-    local destination=$1 candidate=$2
+    local destination=$1 candidate=$2 digest
     if [[ -e $destination || -L $destination ]]; then
         if [[ -L $destination ]]; then
             die "$destination is a symlink; replace it yourself before running the installer."
         fi
         if ! cmp -s "$destination" "$candidate" && [[ $FORCE -ne 1 ]]; then
+            digest=$(sha256_of "$destination")
             # Exact v1 launcher can be upgraded while preserving customized copies.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 08ba0128ccd739be06daaa881a410bd43fa9c94219bad5386ad051552f4ec589 ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == 08ba0128ccd739be06daaa881a410bd43fa9c94219bad5386ad051552f4ec589 ]]; then
                 return
             fi
             # Exact v2 launcher can be upgraded while preserving customized copies.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 6f53b50b526db4d3a081802589bf79552bf3790cd94a5eeed57a82395bc95044 ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == 6f53b50b526db4d3a081802589bf79552bf3790cd94a5eeed57a82395bc95044 ]]; then
                 return
             fi
             # Exact v2.1 launcher can be upgraded while preserving customized copies.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == a9e7d2070b44e7726229f87f2ca6de7a0286a4189196327f1b1c2cf758d73e57 ]]; then
                 return
             fi
             # Exact v3 launcher can be upgraded while preserving customized copies.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == 2d5091b3c014a0419851cba9b70536e2895cdde0c32dccfe9c0c816f67084cd3 ]]; then
                 return
             fi
             # Exact v3.1 launcher from main can be upgraded without --force.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == c142332f000547a9f4d2481a4ec99fd7a05cb14b164cb6e753fcc948f54aac69 ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == c142332f000547a9f4d2481a4ec99fd7a05cb14b164cb6e753fcc948f54aac69 ]]; then
                 return
             fi
             # Exact v5 launcher from features can be upgraded without --force.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 29bd47c36a888ab461f29f9e0279c7e28f831eea89398bd0cc6f408ce2210f4a ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == 29bd47c36a888ab461f29f9e0279c7e28f831eea89398bd0cc6f408ce2210f4a ]]; then
                 return
             fi
             # Exact v4 launcher can be upgraded while preserving customized copies.
-            if [[ $destination == "$LAUNCHER" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 3a1b1b4ab6087fad9e68e3cab6090e6d436f76be1cd62457bad3046c0c9de1dc ]]; then
+            if [[ $destination == "$LAUNCHER" && $digest == 3a1b1b4ab6087fad9e68e3cab6090e6d436f76be1cd62457bad3046c0c9de1dc ]]; then
+                return
+            fi
+            # Exact v6 launcher (pre-macOS) can be upgraded without --force.
+            if [[ $destination == "$LAUNCHER" && $digest == 27ad56bde8ce3b12c4b085ab0f054ba40ddf918d2836c7c5fd9f444220bc93a7 ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v2 automatically.
-            if [[ $destination == "$DOCKERFILE" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == f7f6f0bda1d94a92441c04818d3775a24be01a6a9b80bec0a53a2c53642f02e0 ]]; then
+            if [[ $destination == "$DOCKERFILE" && $digest == f7f6f0bda1d94a92441c04818d3775a24be01a6a9b80bec0a53a2c53642f02e0 ]]; then
                 return
             fi
             # Upgrade the exact v1 entrypoint (fixes gosu resetting HOME).
-            if [[ $destination == "$CONFIG_DIR/entrypoint.sh" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == eaba06fe6c74a729b7c3a561582aee0ee9476ace1e4a80fb85d214e82f6c8f5c ]]; then
+            if [[ $destination == "$CONFIG_DIR/entrypoint.sh" && $digest == eaba06fe6c74a729b7c3a561582aee0ee9476ace1e4a80fb85d214e82f6c8f5c ]]; then
                 return
             fi
             # Upgrade the exact Dockerfile shipped in image v1 automatically.
-            if [[ $destination == "$DOCKERFILE" ]] && \
-                [[ $(sha256sum "$destination" | cut -d' ' -f1) == 553a25e729d82e38f7883f345d8b1b0672f15aa1aa70397a49d4b691967de8a0 ]]; then
+            if [[ $destination == "$DOCKERFILE" && $digest == 553a25e729d82e38f7883f345d8b1b0672f15aa1aa70397a49d4b691967de8a0 ]]; then
                 return
             fi
             die "$destination differs from this installer; use --force to replace it."
@@ -795,6 +873,10 @@ fi
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR/home" "$BIN_DIR" "$PI_DIR"
 chmod 700 "$CONFIG_DIR" "$DATA_DIR" "$DATA_DIR/home" "$PI_DIR"
+if [[ $HOST_OS == Darwin ]]; then
+    mkdir -p "$NPM_DIR"
+    chmod 700 "$NPM_DIR"
+fi
 migrate_legacy_url_files
 
 # URL flags override; otherwise derive from the pi_configs/ files next to this script.
@@ -870,17 +952,25 @@ fi
 "$LAUNCHER" --version || die 'Pi did not start; check the Docker build and runtime output above.'
 
 # Pi packages live under the shared ~/.pi profile, not in the image.
+# On macOS the shared profile's npm directory is overlaid by a container-local
+# store ($NPM_DIR), so packages installed by native macOS Pi are never reused
+# or clobbered by the Linux container.
 # Skipping an installed package avoids network downloads on ordinary reruns.
+if [[ $HOST_OS == Darwin ]]; then
+    pkg_store="$NPM_DIR"
+else
+    pkg_store="$PI_DIR/agent/npm"
+fi
 for package in pi-permission-modes pi-ext-int-search; do
-    if [[ -d $PI_DIR/agent/npm/node_modules/$package ]]; then
+    if [[ -d $pkg_store/node_modules/$package ]]; then
         printf 'Pi package already installed: %s\n' "$package"
     else
         printf 'Installing Pi package: %s\n' "$package"
         ( cd "$CONFIG_DIR" && "$LAUNCHER" install "npm:$package" ) || die "Could not install $package. Rerun the installer to retry."
-        if [[ ! -d $PI_DIR/agent/npm/node_modules/$package ]]; then
+        if [[ ! -d $pkg_store/node_modules/$package ]]; then
             ( cd "$CONFIG_DIR" && "$LAUNCHER" update "npm:$package" ) || die "Could not reconcile $package. Rerun the installer to retry."
         fi
-        [[ -d $PI_DIR/agent/npm/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
+        [[ -d $pkg_store/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
     fi
 done
 
