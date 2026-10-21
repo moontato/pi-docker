@@ -56,6 +56,22 @@ if args and args[0] == 'build':
     from pathlib import Path
     context = {p.name: p.read_text() for p in Path(args[-1]).iterdir() if p.is_file()}
     Path(os.environ['DOCKER_TEST_LOG'] + '.context').write_text(json.dumps(context))
+if 'local/pi-docker:latest' in args:
+    command = args[args.index('local/pi-docker:latest') + 1:]
+    if command and command[0] in ('install', 'update'):
+        mode = os.environ.get('DOCKER_TEST_PACKAGE_MODE', '')
+        if mode == 'fail':
+            sys.exit(7)
+        if mode != 'noop' and (mode != 'update-only' or command[0] == 'update'):
+            from pathlib import Path
+            mounts = [args[i + 1] for i, arg in enumerate(args) if arg == '--mount']
+            for mount in mounts:
+                fields = dict(field.split('=', 1) for field in mount.split(',') if '=' in field)
+                if fields.get('target') == '/home/pi/.pi':
+                    store = Path(fields['source']) / 'agent/npm'
+                elif fields.get('target') == '/home/pi/.pi/agent/npm':
+                    store = Path(fields['source'])
+            (store / 'node_modules' / command[1].split(':', 1)[1]).mkdir(parents=True, exist_ok=True)
 if '--entrypoint' in args:
     entrypoint = args[args.index('--entrypoint') + 1]
     if entrypoint == 'pi':
@@ -92,7 +108,7 @@ printf '%s\n' "${UNAME_OS:-Linux}"
     def prepare_profile(self, isolated=False):
         agent = (self.home / ".local/share/pi-docker/agent" if isolated
                  else self.home / ".pi/agent")
-        for package in ("pi-permission-modes", "pi-ext-int-search"):
+        for package in ("pi-permission-modes", "pi-ext-int-search", "pi-subagents"):
             (agent / "npm/node_modules" / package).mkdir(parents=True)
         (agent / "auth.json").write_text('{"test": {"key": "never-print-this"}}\n')
         (self.home / ".local/share/pi-docker/home").mkdir(parents=True, exist_ok=True)
@@ -206,11 +222,12 @@ print(json.dumps({'home': os.environ['HOME'],
         self.env["UNAME_OS"] = "Darwin"
         self.prepare_profile()
         store = self.home / ".local/share/pi-docker/npm/node_modules"
-        for package in ("pi-permission-modes", "pi-ext-int-search"):
+        for package in ("pi-permission-modes", "pi-ext-int-search", "pi-subagents"):
             (store / package).mkdir(parents=True)
         result = self.launch("doctor")
         self.assertIn("Package installed: pi-permission-modes", result.stdout)
         self.assertIn("Package installed: pi-ext-int-search", result.stdout)
+        self.assertIn("Package installed: pi-subagents", result.stdout)
         self.assertIn("Container npm store", result.stdout)
         self.assertIn("Darwin", result.stdout)
 
@@ -396,6 +413,121 @@ print(json.dumps({'home': os.environ['HOME'],
         listing = self.launch("config", "list").stdout
         self.assertIn("OPENAI_API_KEY=***", listing)
         self.assertNotIn("keep-this-key", listing)
+
+    def package_calls(self):
+        return [call[call.index(IMAGE) + 1:] for call in self.calls()
+                if IMAGE in call and call[call.index(IMAGE) + 1:][:1] in (["install"], ["update"])]
+
+    def existing_installation(self):
+        self.prepare_profile()
+        launcher = self.home / ".local/bin/pi-docker"
+        executable(launcher, generated(self.source, "LAUNCHER") + "\n# custom launcher\n")
+        return launcher
+
+    def test_default_install_installs_all_three_packages(self):
+        agent = self.prepare_profile()
+        for path in (agent / "npm/node_modules").iterdir():
+            path.rmdir()
+        self.run_script(INSTALLER, "--searxng-url", "https://search.example",
+                        "--llama-url", "http://localhost:8080")
+        self.assertEqual(self.package_calls(), [
+            ["install", "npm:pi-permission-modes"],
+            ["install", "npm:pi-ext-int-search"],
+            ["install", "npm:pi-subagents"],
+        ])
+
+    def test_subagents_only_preserves_custom_files_and_skips_url_configuration(self):
+        launcher = self.existing_installation()
+        (self.home / ".pi/agent/npm/node_modules/pi-subagents").rmdir()
+        config = self.home / ".config/pi-docker"
+        (config / "env").write_text("SEARXNG_URL=https://keep-this.example\n")
+        (config / "Dockerfile").write_text("custom Dockerfile\n")
+        (config / "entrypoint.sh").write_text("custom entrypoint\n")
+        paths = [launcher, *config.iterdir()]
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+        executable(self.bin / "jq", "#!/bin/sh\necho 'jq must not run' >&2\nexit 99\n")
+        self.run_script(INSTALLER, "--install-subagents")
+        self.assertEqual(self.package_calls(), [["install", "npm:pi-subagents"]])
+        self.assertEqual([call[0] for call in self.calls()], ["info", "run"])
+        for path, snapshot in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), snapshot)
+        self.log.unlink()
+        result = self.run_script(INSTALLER, "--install-subagents")
+        self.assertIn("Pi package already installed: pi-subagents", result.stdout)
+        self.assertEqual(self.package_calls(), [])
+
+    def test_subagents_only_macos_uses_xdg_container_store_not_host_packages(self):
+        self.existing_installation()  # Includes native host pi-subagents.
+        self.env.update(UNAME_OS="Darwin", XDG_DATA_HOME=str(self.root / "custom-data"))
+        self.run_script(INSTALLER, "--install-subagents")
+        self.assertEqual(self.package_calls(), [["install", "npm:pi-subagents"]])
+        self.assertTrue((self.root / "custom-data/pi-docker/npm/node_modules/pi-subagents").is_dir())
+        self.log.unlink()
+        self.run_script(INSTALLER, "--install-subagents")
+        self.assertEqual(self.package_calls(), [])
+
+    def test_subagents_only_uses_launcher_on_path_without_default_config(self):
+        self.run_script(INSTALLER, "--install-subagents")
+        self.assertEqual(self.package_calls(), [["install", "npm:pi-subagents"]])
+        self.assertFalse((self.home / ".config/pi-docker/Dockerfile").exists())
+        self.assertFalse((self.home / ".local/bin/pi-docker").exists())
+
+    def test_subagents_only_requires_existing_launcher(self):
+        self.launcher.unlink()
+        result = self.run_script(INSTALLER, "--install-subagents", expected=1)
+        self.assertIn("pi-docker is not installed", result.stderr)
+        self.assertFalse((self.home / ".pi").exists())
+        self.assertFalse((self.home / ".local").exists())
+        self.assertFalse((self.home / ".config").exists())
+
+    def test_subagents_only_reconciles_when_install_does_not_populate_store(self):
+        self.env["DOCKER_TEST_PACKAGE_MODE"] = "update-only"
+        self.run_script(INSTALLER, "--install-subagents")
+        self.assertEqual(self.package_calls(), [["install", "npm:pi-subagents"],
+                                                ["update", "npm:pi-subagents"]])
+
+    def test_subagents_only_reports_install_failure(self):
+        self.env["DOCKER_TEST_PACKAGE_MODE"] = "fail"
+        result = self.run_script(INSTALLER, "--install-subagents", expected=1)
+        self.assertIn("Could not install pi-subagents", result.stderr)
+        self.assertNotIn("Ready:", result.stdout)
+
+    def test_subagents_only_checks_package_exists_after_reconciliation(self):
+        self.env["DOCKER_TEST_PACKAGE_MODE"] = "noop"
+        result = self.run_script(INSTALLER, "--install-subagents", expected=1)
+        self.assertIn("pi-subagents was not installed under the shared Pi profile", result.stderr)
+        self.assertNotIn("Ready:", result.stdout)
+
+    def test_subagents_only_rejects_other_setup_flags_before_docker(self):
+        for args in (("--rebuild",), ("--force",),
+                     ("--searxng-url", "https://search.example"),
+                     ("--llama-url", "http://localhost:8080")):
+            with self.subTest(args=args):
+                result = self.run_script(INSTALLER, "--install-subagents", *args, expected=1)
+                self.assertIn("cannot be combined", result.stderr)
+                self.assertFalse(self.log.exists())
+
+    def test_exact_v8_launcher_upgrades_without_force(self):
+        import hashlib
+        self.prepare_profile()
+        launcher = self.home / ".local/bin/pi-docker"
+        old_launcher = generated(self.source, "LAUNCHER").replace(
+            "(v9)", "(v8)").replace(
+            "for key in pi-permission-modes pi-ext-int-search pi-subagents; do",
+            "for key in pi-permission-modes pi-ext-int-search; do")
+        self.assertEqual(hashlib.sha256(old_launcher.encode()).hexdigest(),
+                         "ab3121f4b9eb0a101c75a2a5bcb245395b0ea932bc1b66c0c7fddc6be622a227")
+        executable(launcher, old_launcher)
+        self.run_script(INSTALLER, "--searxng-url", "https://search.example",
+                        "--llama-url", "http://localhost:8080")
+        self.assertEqual(launcher.read_text(), generated(self.source, "LAUNCHER"))
+        self.assertFalse(any(call[0] == "build" for call in self.calls()))
+
+    def test_doctor_reports_missing_subagents(self):
+        agent = self.prepare_profile()
+        (agent / "npm/node_modules/pi-subagents").rmdir()
+        result = self.launch("doctor", expected=1)
+        self.assertIn("Package missing: pi-subagents", result.stdout)
 
     def test_installer_does_not_overwrite_custom_entrypoint(self):
         config = self.home / ".config/pi-docker"

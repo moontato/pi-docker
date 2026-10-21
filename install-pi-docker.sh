@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v8)
+# Managed by install-pi-docker.sh (v9)
 set -Eeuo pipefail
 umask 077
 
@@ -17,6 +17,7 @@ DOCKERFILE="$CONFIG_DIR/Dockerfile"
 ENV_FILE="$CONFIG_DIR/env"
 REBUILD=0
 FORCE=0
+INSTALL_SUBAGENTS_ONLY=0
 SEARXNG_URL_ARG=''
 SET_SEARXNG=0
 LLAMA_URL_ARG=''
@@ -25,6 +26,10 @@ SET_LLAMA=0
 usage() {
     cat <<'USAGE'
 Usage: ./install-pi-docker.sh [--rebuild] [--force] [--searxng-url URL] [--llama-url URL]
+       ./install-pi-docker.sh --install-subagents
+  --install-subagents  Install only pi-subagents using an existing pi-docker.
+                       Does not rebuild or replace the image, launcher, or service configuration;
+                       cannot be combined with other setup flags and does not require jq.
   --rebuild  Pull the base image and rebuild the managed Pi image (updates Pi).
   --force    Replace conflicting files or image tag deliberately.
   --searxng-url URL  Override the SearXNG URL; default is searxngBaseUrl in pi_configs/web-search.json.
@@ -41,7 +46,7 @@ On macOS, pi-docker uses Docker Desktop's normal network by default; pass
 --tailnet to use Docker Desktop host networking (Docker Desktop 4.34+).
 pi-docker shares your ~/.pi profile with host Pi by default (logins, settings,
 sessions, packages); pass --isolated to pi-docker for the old separate profile.
-Installs pi-permission-modes and pi-ext-int-search into the shared Pi profile.
+Installs pi-permission-modes, pi-ext-int-search, and pi-subagents into the shared Pi profile.
 The image includes fd, ripgrep, bubblewrap, and socat; no startup tool downloads are needed.
 USAGE
 }
@@ -109,6 +114,7 @@ while (($#)); do
     case "$1" in
         --rebuild) REBUILD=1 ;;
         --force) FORCE=1 ;;
+        --install-subagents) INSTALL_SUBAGENTS_ONLY=1 ;;
         --searxng-url)
             (($# >= 2)) || die '--searxng-url requires a URL.'
             SEARXNG_URL_ARG=$2
@@ -127,6 +133,10 @@ while (($#)); do
     shift
 done
 
+if ((INSTALL_SUBAGENTS_ONLY && (REBUILD || FORCE || SET_SEARXNG || SET_LLAMA))); then
+    die '--install-subagents cannot be combined with --rebuild, --force, --searxng-url, or --llama-url.'
+fi
+
 if ((SET_SEARXNG)); then
     [[ $SEARXNG_URL_ARG =~ ^https?://[^[:space:]]+$ ]] || die 'SearXNG URL must start with http:// or https:// and contain no whitespace.'
     [[ $SEARXNG_URL_ARG != *'<'* && $SEARXNG_URL_ARG != *'>'* ]] || die 'Replace the placeholder with your actual SearXNG address.'
@@ -144,6 +154,42 @@ esac
 command -v docker >/dev/null || die 'Docker is not installed or is not on PATH.'
 docker info >/dev/null 2>&1 || die 'Cannot access the Docker daemon as this user.'
 [[ -d $HOME ]] || die 'HOME must be a real directory.'
+
+# Pi packages live under the shared ~/.pi profile, not in the image.
+# macOS overlays that profile's npm directory with a container-local store so
+# native macOS packages are never reused or clobbered by the Linux container.
+install_packages() {
+    local pkg_store package install_dir=$CONFIG_DIR
+    if [[ $HOST_OS == Darwin ]]; then
+        pkg_store="$NPM_DIR"
+    else
+        pkg_store="$PI_DIR/agent/npm"
+    fi
+    # Avoid installing from the caller's project. A PATH-provided launcher may
+    # not have a config directory at the default location yet.
+    [[ -d $install_dir ]] || install_dir=$HOME
+    for package in "$@"; do
+        if [[ -d $pkg_store/node_modules/$package ]]; then
+            printf 'Pi package already installed: %s\n' "$package"
+        else
+            printf 'Installing Pi package: %s\n' "$package"
+            ( cd "$install_dir" && "$LAUNCHER" install "npm:$package" ) || die "Could not install $package. Rerun the installer to retry."
+            if [[ ! -d $pkg_store/node_modules/$package ]]; then
+                ( cd "$install_dir" && "$LAUNCHER" update "npm:$package" ) || die "Could not reconcile $package. Rerun the installer to retry."
+            fi
+            [[ -d $pkg_store/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
+        fi
+    done
+}
+
+if ((INSTALL_SUBAGENTS_ONLY)); then
+    if [[ ! -x $LAUNCHER ]]; then
+        LAUNCHER=$(command -v pi-docker) || die 'pi-docker is not installed. Run ./install-pi-docker.sh first.'
+    fi
+    install_packages pi-subagents
+    printf '\nReady: pi-subagents installed in the shared Pi profile. Restart Pi or run /reload to load it.\n'
+    exit 0
+fi
 
 work_dir=$(mktemp -d -p "${TMPDIR:-/tmp}")
 trap 'rm -rf "$work_dir"' EXIT
@@ -215,7 +261,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v8)
+# Managed by install-pi-docker.sh (v9)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -536,7 +582,7 @@ doctor() {
             *) doctor_pkg_root="$PI_DIR/agent/npm" ;;
         esac
     fi
-    for key in pi-permission-modes pi-ext-int-search; do
+    for key in pi-permission-modes pi-ext-int-search pi-subagents; do
         if [[ -d $doctor_pkg_root/node_modules/$key ]]; then
             doc_ok "Package installed: $key"
         else
@@ -864,6 +910,10 @@ check_file() {
             if [[ $destination == "$LAUNCHER" && $digest == 445eeba0e5d58a7b21c06fe2eddc2323a1ac23b31d03499affcf24663b529561 ]]; then
                 return
             fi
+            # Exact v8 launcher (before the subagents package check) upgrades automatically.
+            if [[ $destination == "$LAUNCHER" && $digest == ab3121f4b9eb0a101c75a2a5bcb245395b0ea932bc1b66c0c7fddc6be622a227 ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v3 automatically.
             if [[ $destination == "$DOCKERFILE" && $digest == a2b26fcc850ba65ec9605733153387dd4a40a644344638b7a0acc66080c1648c ]]; then
                 return
@@ -981,28 +1031,8 @@ fi
 
 "$LAUNCHER" --version || die 'Pi did not start; check the Docker build and runtime output above.'
 
-# Pi packages live under the shared ~/.pi profile, not in the image.
-# On macOS the shared profile's npm directory is overlaid by a container-local
-# store ($NPM_DIR), so packages installed by native macOS Pi are never reused
-# or clobbered by the Linux container.
-# Skipping an installed package avoids network downloads on ordinary reruns.
-if [[ $HOST_OS == Darwin ]]; then
-    pkg_store="$NPM_DIR"
-else
-    pkg_store="$PI_DIR/agent/npm"
-fi
-for package in pi-permission-modes pi-ext-int-search; do
-    if [[ -d $pkg_store/node_modules/$package ]]; then
-        printf 'Pi package already installed: %s\n' "$package"
-    else
-        printf 'Installing Pi package: %s\n' "$package"
-        ( cd "$CONFIG_DIR" && "$LAUNCHER" install "npm:$package" ) || die "Could not install $package. Rerun the installer to retry."
-        if [[ ! -d $pkg_store/node_modules/$package ]]; then
-            ( cd "$CONFIG_DIR" && "$LAUNCHER" update "npm:$package" ) || die "Could not reconcile $package. Rerun the installer to retry."
-        fi
-        [[ -d $pkg_store/node_modules/$package ]] || die "$package was not installed under the shared Pi profile. Check with pi-docker list and retry."
-    fi
-done
+# Skipping installed packages avoids network downloads on ordinary reruns.
+install_packages pi-permission-modes pi-ext-int-search pi-subagents
 
 if [[ -f $PI_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$PI_DIR/agent/settings.json"; then
     printf 'Note: @oresk/pi-searxng also declares web_search; consider removing it if both tools conflict.\n' >&2

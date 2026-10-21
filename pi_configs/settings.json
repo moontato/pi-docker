@@ -3,7 +3,8 @@
   "theme": "dark",
   "packages": [
     "npm:pi-permission-modes",
-    "npm:pi-ext-int-search"
+    "npm:pi-ext-int-search",
+    "npm:pi-subagents"
   ],
   "defaultProvider": "llama-server",
   "defaultModel": "your-model-id",

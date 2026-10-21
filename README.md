@@ -13,7 +13,7 @@ chmod +x install-pi-docker.sh
 ./install-pi-docker.sh
 ```
 
-The installer builds the image, installs the Pi packages, and reads the SearXNG and llama URLs from `pi_configs/web-search.json` and `pi_configs/models.json`, saving them between runs. Pass `--searxng-url URL` or `--llama-url URL` to override the config files.
+The installer builds the image, installs `pi-permission-modes`, `pi-ext-int-search`, and `pi-subagents` by default, and reads the SearXNG and llama URLs from `pi_configs/web-search.json` and `pi_configs/models.json`, saving them between runs. Pass `--searxng-url URL` or `--llama-url URL` to override the config files.
 
 **Note:** the URLs in `pi_configs/` are placeholders — replace them with your tailnet services' actual addresses before running the installer: the `llama-server` provider block in `models.json` (`baseUrl` and the `your-model-id` template model; duplicate the block for each additional llama server), `defaultProvider`, `defaultModel` and `modelOverrides` in `settings.json`, and `searxngBaseUrl` plus the `100.100.0.1/32` SSRF range in `web-search.json`.
 
@@ -26,6 +26,16 @@ cd ..
 ```
 
 The deployer shows changes and asks before copying. Its default target is `host` (your `~/.pi` profile); `--target docker` and `--target both` are aliases, since pi-docker shares `~/.pi` by default. Use `--check` for a non-interactive drift report (exit 1 if drift), and `--restore` to roll the listed destinations back from their `.bak` backups.
+
+### Add pi-subagents to an existing installation
+
+If pi-docker is already installed, install just the extension with:
+
+```bash
+./install-pi-docker.sh --install-subagents
+```
+
+This uses the existing `~/.local/bin/pi-docker` (or `pi-docker` on PATH), skips packages already present, and does not rebuild the image, replace managed files, or reconfigure service URLs from `pi_configs/`. It requires Docker to be running but does not require jq or configured service URLs. It cannot be combined with the other setup flags. The package is installed in the shared profile (or the container-local npm store on macOS), not the `--isolated` profile. Restart Pi or run `/reload` to load it.
 
 ## macOS
 
@@ -98,7 +108,7 @@ Pi's own copy notification can mean it emitted an OSC 52 clipboard request, not 
 
 ### Startup/authentication troubleshooting
 
-After updating this repository, run `./install-pi-docker.sh` again. The v8 launcher and v4 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
+After updating this repository, run `./install-pi-docker.sh` again. The v9 launcher and v4 image upgrade automatically from the unmodified managed versions; no `--force` or manual profile copying is needed. The image includes `fd` so startup does not download it from GitHub.
 
 The entrypoint restores `HOME=/home/pi` **after** `gosu` switches users. Otherwise UID 1000 resolves to the Node image's `/home/node`, and Pi misses the shared profile. Default networking uses the host resolver rather than forcing `100.100.100.100`, preserving both public DNS and Tailscale split DNS.
 

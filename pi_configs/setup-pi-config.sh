@@ -148,7 +148,7 @@ if ((INSTALL_PACKAGES)); then
         Darwin) pkg_root="${XDG_DATA_HOME:-$HOME/.local/share}/pi-docker/npm/node_modules" ;;
         *) pkg_root="$HOME/.pi/agent/npm/node_modules" ;;
     esac
-    for package in pi-permission-modes pi-ext-int-search; do
+    for package in pi-permission-modes pi-ext-int-search pi-subagents; do
         if [[ -d $pkg_root/$package ]]; then
             printf '[INSTALLED] %s\n' "$package"
         else

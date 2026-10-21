@@ -14,7 +14,7 @@ sha256_of() {
     fi
 }
 trap 'result=$?; if (( result )); then [[ ! -f "$tmp/out" ]] || tail -20 "$tmp/out" >&2; fi; rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search}
+mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
 cat > "$tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_CALLS_LOG"
@@ -41,7 +41,7 @@ chmod 600 "$tmp/config/pi-docker/env"
 ! grep -q '^build ' "$tmp/calls"
 grep -q -- '--dns=127.0.0.53' "$tmp/calls"
 launcher="$tmp/.local/bin/pi-docker"
-grep -q 'Managed by install-pi-docker.sh (v8)' "$launcher"
+grep -q 'Managed by install-pi-docker.sh (v9)' "$launcher"
 [[ $("$launcher" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
 cp "$launcher" "$tmp/expected"
 "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
@@ -71,7 +71,7 @@ cmp "$launcher" "$tmp/expected"
 
 # macOS install: same managed launcher (OS is detected at runtime), and the
 # container-local npm store is pre-seeded so package installs are skipped.
-mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search}
+mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
 UNAME_OS=Darwin "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
 cmp "$launcher" "$tmp/expected"
 ! grep -q '^build ' "$tmp/calls"

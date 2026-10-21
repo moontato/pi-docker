@@ -36,6 +36,30 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(file=file.name):
                 self.assertIsInstance(json.loads(file.read_text()), dict)
 
+    def test_default_settings_include_subagents(self):
+        settings = json.loads((CONFIGS / "settings.json").read_text())
+        self.assertIn("npm:pi-subagents", settings["packages"])
+
+    def test_deployer_installs_subagents_alongside_existing_packages(self):
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir()
+        launcher = bin_dir / "pi-docker"
+        launcher.write_text("""#!/bin/sh
+printf '%s %s\\n' "$1" "$2" >> "$HOME/packages.log"
+mkdir -p "$HOME/.pi/agent/npm/node_modules/${2#npm:}"
+""")
+        launcher.chmod(0o755)
+        uname = bin_dir / "uname"
+        uname.write_text("#!/bin/sh\nprintf 'Linux\\n'\n")
+        uname.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + ":/usr/bin:/bin"
+        self.deploy("--yes", "--install-packages")
+        self.assertEqual((self.home / "packages.log").read_text().splitlines(), [
+            "install npm:pi-permission-modes",
+            "install npm:pi-ext-int-search",
+            "install npm:pi-subagents",
+        ])
+
     def test_sandbox_modes_inherit_current_security_defaults(self):
         config = json.loads((CONFIGS / "permission-mode.json").read_text())
         for name in ("default", "plan", "build"):
