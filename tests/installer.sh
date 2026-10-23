@@ -14,7 +14,7 @@ sha256_of() {
     fi
 }
 trap 'result=$?; if (( result )); then [[ ! -f "$tmp/out" ]] || tail -20 "$tmp/out" >&2; fi; rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
+mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model}
 cat > "$tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_CALLS_LOG"
@@ -41,7 +41,7 @@ chmod 600 "$tmp/config/pi-docker/env"
 ! grep -q '^build ' "$tmp/calls"
 grep -q -- '--dns=127.0.0.53' "$tmp/calls"
 launcher="$tmp/.local/bin/pi-docker"
-grep -q 'Managed by install-pi-docker.sh (v9)' "$launcher"
+grep -q 'Managed by install-pi-docker.sh (v10)' "$launcher"
 [[ $("$launcher" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
 cp "$launcher" "$tmp/expected"
 "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
@@ -58,6 +58,16 @@ if git -C "$repo" cat-file -e 66b4e4f:install-pi-docker.sh 2>/dev/null; then
     printf 'exact v3 launcher auto-upgrade passed\n'
 fi
 
+# Verify the real v9 checksum upgrade (adds pi-compaction-model to packages).
+if git -C "$repo" cat-file -e 39750f9:install-pi-docker.sh 2>/dev/null; then
+    git -C "$repo" show 39750f9:install-pi-docker.sh |
+        awk '/^cat >"\$work_dir\/pi-docker" <<'"'"'LAUNCHER_CONTENT'"'"'/{p=1;next} /^LAUNCHER_CONTENT$/{p=0} p' > "$launcher"
+    [[ $(sha256_of "$launcher") == 5bef69ef29e01097638ca339f870142571193e48da5f84751ebcf4b670e88ad3 ]]
+    "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
+    cmp "$launcher" "$tmp/expected"
+    printf 'exact v9 launcher auto-upgrade passed\n'
+fi
+
 printf '\n# user customization\n' >> "$launcher"
 cp "$launcher" "$tmp/custom"
 if "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1; then
@@ -71,9 +81,27 @@ cmp "$launcher" "$tmp/expected"
 
 # macOS install: same managed launcher (OS is detected at runtime), and the
 # container-local npm store is pre-seeded so package installs are skipped.
-mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
+mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model}
 UNAME_OS=Darwin "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
 cmp "$launcher" "$tmp/expected"
 ! grep -q '^build ' "$tmp/calls"
+
+# Verify pi-compaction-model is in the default package installation flow.
+grep -q 'install_packages pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model' "$repo/install-pi-docker.sh"
+# Verify pi-compaction-model is in the doctor check loop.
+grep -q 'pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model' "$repo/install-pi-docker.sh"
+# Verify the usage text mentions pi-compaction-model.
+grep -q 'pi-compaction-model' "$repo/install-pi-docker.sh"
+# Verify the launcher's doctor check includes pi-compaction-model.
+grep -q 'pi-compaction-model' "$launcher"
+
+# Verify modified launchers are still protected against unintended overwrites.
+printf '\n# user customization v2\n' >> "$launcher"
+cp "$launcher" "$tmp/custom2"
+if "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1; then
+    echo 'installer overwrote a customized launcher without --force' >&2; exit 1
+fi
+grep -q 'differs from this installer' "$tmp/out"
+cmp "$launcher" "$tmp/custom2"
 
 printf 'generic installer checks passed\n'
