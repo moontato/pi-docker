@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v10)
+# Managed by install-pi-docker.sh (v11)
 set -Eeuo pipefail
 umask 077
 
@@ -46,7 +46,7 @@ On macOS, pi-docker uses Docker Desktop's normal network by default; pass
 --tailnet to use Docker Desktop host networking (Docker Desktop 4.34+).
 pi-docker shares your ~/.pi profile with host Pi by default (logins, settings,
 sessions, packages); pass --isolated to pi-docker for the old separate profile.
-Installs pi-permission-modes, pi-ext-int-search, pi-subagents, and pi-compaction-model into the shared Pi profile.
+Installs pi-permission-modes, pi-ext-int-search, and pi-subagents, plus the local pi-compaction-thinking extension.
 The image includes fd, ripgrep, bubblewrap, and socat; no startup tool downloads are needed.
 USAGE
 }
@@ -182,6 +182,31 @@ install_packages() {
     done
 }
 
+# Install the local compaction extension into the mounted shared Pi profile.
+# The source stays in this repository, while the copy survives container removal.
+# Never overwrite a locally customized extension without explicit --force.
+install_compaction_extension() {
+    local src_dir="$SCRIPT_DIR/extensions" dest_dir="$PI_DIR/agent/extensions"
+    local filename source destination
+    mkdir -p "$dest_dir"
+    for filename in pi-compaction-thinking.ts LICENSE.pi-compaction-thinking; do
+        source="$src_dir/$filename"
+        destination="$dest_dir/$filename"
+        [[ -s $source ]] || die "Missing required local extension file: $source"
+        [[ ! -L $destination ]] || die "Refusing to replace symlink: $destination"
+        if [[ -e $destination ]]; then
+            [[ -f $destination ]] || die "Not a regular extension file: $destination"
+            if cmp -s "$source" "$destination"; then
+                printf 'Local extension file already installed: %s\n' "$filename"
+                continue
+            fi
+            (( FORCE )) || die "$destination has different contents; review it and rerun with --force to replace."
+        fi
+        install -m 600 "$source" "$destination"
+        printf 'Installed local extension file: %s\n' "$filename"
+    done
+}
+
 if ((INSTALL_SUBAGENTS_ONLY)); then
     if [[ ! -x $LAUNCHER ]]; then
         LAUNCHER=$(command -v pi-docker) || die 'pi-docker is not installed. Run ./install-pi-docker.sh first.'
@@ -261,7 +286,7 @@ ENTRYPOINT_CONTENT
 
 cat >"$work_dir/pi-docker" <<'LAUNCHER_CONTENT'
 #!/usr/bin/env bash
-# Managed by install-pi-docker.sh (v10)
+# Managed by install-pi-docker.sh (v11)
 set -Eeuo pipefail
 
 IMAGE=local/pi-docker:latest
@@ -582,13 +607,19 @@ doctor() {
             *) doctor_pkg_root="$PI_DIR/agent/npm" ;;
         esac
     fi
-    for key in pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model; do
+    for key in pi-permission-modes pi-ext-int-search pi-subagents; do
         if [[ -d $doctor_pkg_root/node_modules/$key ]]; then
             doc_ok "Package installed: $key"
         else
             doc_bad "Package missing: $key (rerun the installer, or: pi-docker install npm:$key)"
         fi
     done
+
+    if [[ -r $doctor_agent_dir/extensions/pi-compaction-thinking.ts ]]; then
+        doc_ok 'Local extension installed: pi-compaction-thinking.ts'
+    else
+        doc_bad 'Local extension missing: pi-compaction-thinking.ts (rerun installer)'
+    fi
 
     doc_note "Selected profile: $doctor_agent_dir"
     if [[ $HOST_OS == Darwin ]] && ((ISOLATED == 0)); then
@@ -918,6 +949,10 @@ check_file() {
             if [[ $destination == "$LAUNCHER" && $digest == 5bef69ef29e01097638ca339f870142571193e48da5f84751ebcf4b670e88ad3 ]]; then
                 return
             fi
+            # Exact v10 launcher (npm compaction-model integration) can upgrade to v11.
+            if [[ $destination == "$LAUNCHER" && $digest == 482284796b6045828c496ad38465fb472e207d68897a1c2f92fd95c50ef87a06 ]]; then
+                return
+            fi
             # Upgrade the exact Dockerfile shipped in image v3 automatically.
             if [[ $destination == "$DOCKERFILE" && $digest == a2b26fcc850ba65ec9605733153387dd4a40a644344638b7a0acc66080c1648c ]]; then
                 return
@@ -1036,7 +1071,13 @@ fi
 "$LAUNCHER" --version || die 'Pi did not start; check the Docker build and runtime output above.'
 
 # Skipping installed packages avoids network downloads on ordinary reruns.
-install_packages pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model
+install_packages pi-permission-modes pi-ext-int-search pi-subagents
+install_compaction_extension
+# The old npm package and local extension both handle session_before_compact.
+# Configuration is user-managed, so warn rather than changing settings here.
+if [[ -f $PI_DIR/agent/settings.json ]] && grep -Fq 'npm:pi-compaction-model' "$PI_DIR/agent/settings.json"; then
+    printf 'WARNING: npm:pi-compaction-model remains configured. Remove it with your config sync to avoid competing compaction hooks.\n' >&2
+fi
 
 if [[ -f $PI_DIR/agent/settings.json ]] && grep -Fq 'npm:@oresk/pi-searxng' "$PI_DIR/agent/settings.json"; then
     printf 'Note: @oresk/pi-searxng also declares web_search; consider removing it if both tools conflict.\n' >&2

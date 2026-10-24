@@ -14,7 +14,7 @@ sha256_of() {
     fi
 }
 trap 'result=$?; if (( result )); then [[ ! -f "$tmp/out" ]] || tail -20 "$tmp/out" >&2; fi; rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model}
+mkdir -p "$tmp/bin" "$tmp/config/pi-docker" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
 cat > "$tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_CALLS_LOG"
@@ -38,14 +38,19 @@ unset PI_DOCKER_DNS SEARXNG_URL LLAMA_BASE_URL
 printf 'PI_DOCKER_DNS=127.0.0.53\n' > "$tmp/config/pi-docker/env"
 chmod 600 "$tmp/config/pi-docker/env"
 "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
+cmp "$repo/extensions/pi-compaction-thinking.ts" "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts"
+cmp "$repo/extensions/LICENSE.pi-compaction-thinking" "$tmp/.pi/agent/extensions/LICENSE.pi-compaction-thinking"
+grep -q 'Installed local extension file: pi-compaction-thinking.ts' "$tmp/out"
+[[ ! -d $tmp/.pi/agent/npm/node_modules/pi-compaction-model ]]
 ! grep -q '^build ' "$tmp/calls"
 grep -q -- '--dns=127.0.0.53' "$tmp/calls"
 launcher="$tmp/.local/bin/pi-docker"
-grep -q 'Managed by install-pi-docker.sh (v10)' "$launcher"
+grep -q 'Managed by install-pi-docker.sh (v11)' "$launcher"
 [[ $("$launcher" config get PI_DOCKER_DNS) == 127.0.0.53 ]]
 cp "$launcher" "$tmp/expected"
 "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
 cmp "$launcher" "$tmp/expected"
+grep -q 'Local extension file already installed: pi-compaction-thinking.ts' "$tmp/out"
 ! grep -q '^build ' "$tmp/calls"
 
 # Verify the real v3 checksum upgrade when the baseline history is available.
@@ -68,6 +73,14 @@ if git -C "$repo" cat-file -e 39750f9:install-pi-docker.sh 2>/dev/null; then
     printf 'exact v9 launcher auto-upgrade passed\n'
 fi
 
+# Regression: the exact v10 launcher shipped before the local-extension change
+# upgrades to v11 automatically, even without git history.
+cp "$repo/tests/fixtures/pi-docker-v10" "$launcher"
+[[ $(sha256_of "$launcher") == 482284796b6045828c496ad38465fb472e207d68897a1c2f92fd95c50ef87a06 ]]
+"$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
+cmp "$launcher" "$tmp/expected"
+printf 'exact v10 launcher auto-upgrade passed\n'
+
 printf '\n# user customization\n' >> "$launcher"
 cp "$launcher" "$tmp/custom"
 if "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1; then
@@ -81,19 +94,26 @@ cmp "$launcher" "$tmp/expected"
 
 # macOS install: same managed launcher (OS is detected at runtime), and the
 # container-local npm store is pre-seeded so package installs are skipped.
-mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model}
+mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
 UNAME_OS=Darwin "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1
 cmp "$launcher" "$tmp/expected"
 ! grep -q '^build ' "$tmp/calls"
 
-# Verify pi-compaction-model is in the default package installation flow.
-grep -q 'install_packages pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model' "$repo/install-pi-docker.sh"
-# Verify pi-compaction-model is in the doctor check loop.
-grep -q 'pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model' "$repo/install-pi-docker.sh"
-# Verify the usage text mentions pi-compaction-model.
-grep -q 'pi-compaction-model' "$repo/install-pi-docker.sh"
-# Verify the launcher's doctor check includes pi-compaction-model.
-grep -q 'pi-compaction-model' "$launcher"
+# Verify the local extension is installed rather than the old npm package.
+grep -q '^install_compaction_extension$' "$repo/install-pi-docker.sh"
+! grep -q 'install_packages pi-permission-modes pi-ext-int-search pi-subagents pi-compaction-model' "$repo/install-pi-docker.sh"
+grep -q 'Local extension installed: pi-compaction-thinking.ts' "$launcher"
+
+# A customized installed extension must not be silently overwritten.
+printf '\n// local customization\n' >> "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts"
+cp "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts" "$tmp/local-custom"
+if "$repo/install-pi-docker.sh" > "$tmp/out" 2>&1; then
+    echo 'installer overwrote a customized extension without --force' >&2; exit 1
+fi
+grep -q 'has different contents' "$tmp/out"
+cmp "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts" "$tmp/local-custom"
+"$repo/install-pi-docker.sh" --force > "$tmp/out" 2>&1
+cmp "$repo/extensions/pi-compaction-thinking.ts" "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts"
 
 # Verify modified launchers are still protected against unintended overwrites.
 printf '\n# user customization v2\n' >> "$launcher"

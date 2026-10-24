@@ -15,7 +15,9 @@ file_mode() {
 trap 'result=$?; if (( result )); then [[ ! -f "$tmp/out" ]] || tail -20 "$tmp/out" >&2; fi; rm -rf "$tmp"' EXIT
 awk '/^cat >"\$work_dir\/pi-docker" <<'"'"'LAUNCHER_CONTENT'"'"'/{p=1;next} /^LAUNCHER_CONTENT$/{p=0} p' "$repo/install-pi-docker.sh" > "$tmp/pi-docker"
 chmod +x "$tmp/pi-docker"
-mkdir -p "$tmp/bin" "$tmp/project" "$tmp/config" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model} "$tmp/data/pi-docker/home"
+mkdir -p "$tmp/.pi/agent/extensions"
+cp "$repo/extensions/pi-compaction-thinking.ts" "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts"
+mkdir -p "$tmp/bin" "$tmp/project" "$tmp/config" "$tmp/.pi/agent/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents} "$tmp/data/pi-docker/home"
 cat > "$tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$DOCKER_CALLS_LOG"
@@ -131,7 +133,7 @@ grep -qx -- '--network=host' "$tmp/args"
 UNAME_OS=Darwin PI_DOCKER_DNS=1.1.1.1 "$tmp/pi-docker" --tailnet
 grep -qx -- '--dns=1.1.1.1' "$tmp/args"
 # Seed the container-local npm store so doctor reports packages present.
-mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents,pi-compaction-model}
+mkdir -p "$tmp/data/pi-docker/npm/node_modules/"{pi-permission-modes,pi-ext-int-search,pi-subagents}
 UNAME_OS=Darwin "$tmp/pi-docker" doctor --tailnet > "$tmp/out"
 grep -q 'Host-network (Docker Desktop) DNS: Docker default' "$tmp/out"
 UNAME_OS=Darwin "$tmp/pi-docker" doctor > "$tmp/out"
@@ -140,5 +142,12 @@ grep -q 'Bridge-network DNS: Docker default' "$tmp/out"
 grep -q 'Package installed: pi-permission-modes' "$tmp/out"
 grep -q 'Package installed: pi-ext-int-search' "$tmp/out"
 grep -q 'Package installed: pi-subagents' "$tmp/out"
-grep -q 'Package installed: pi-compaction-model' "$tmp/out"
+grep -q 'Local extension installed: pi-compaction-thinking.ts' "$tmp/out"
+# Missing local extension must be reported by doctor.
+rm "$tmp/.pi/agent/extensions/pi-compaction-thinking.ts"
+if UNAME_OS=Darwin "$tmp/pi-docker" doctor > "$tmp/out"; then
+    echo 'doctor accepted a missing local compaction extension' >&2; exit 1
+fi
+grep -q 'Local extension missing: pi-compaction-thinking.ts' "$tmp/out"
+
 printf 'generic launcher/DNS checks passed\n'
